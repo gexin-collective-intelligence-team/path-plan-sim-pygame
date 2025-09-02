@@ -58,7 +58,45 @@ def load_demo(file_name):
     return Result_Demo(start=start_point, end=end_point, time=time, obstacles=obstacles,
                        dynamic_obstacles=dynamic_obstacles, track=track,
                        smoothness=smoothness, pathlen=pathlen)
+def load_look(file_name):
+    """
+    加载result_demo(路径规划问题结果类)
+    :param file_name:
+    :return:
+    """
+    with open(file_name, 'r') as file:
+        geojson_str = file.read()
+        # 替换字符串中的NaN为null
+    geojson_str = re.sub(r'NaN', 'null', geojson_str)
+    try:
+        geojson_obj = geojson.loads(geojson_str)
+    except ValueError as e:
+        print(f"Error loading GeoJSON: {e}")
+        return None  # 或者根据需要进行其他错误处理
+    obstacles = []
+    dynamic_obstacles = []
+    for feature in geojson_obj['features']:
+        geometry = feature['geometry']
+        properties = feature['properties']
+        if geometry['type'] == 'Point' and properties['name'] == "\u8d77\u59cb\u70b9":
+            start_point = geometry['coordinates']
+        if geometry['type'] == 'Point' and properties['name'] == "\u7ec8\u70b9":
+            end_point = geometry['coordinates']
+        elif geometry['type'] == 'Polygon':
+            obstacles.append(Polygon(geometry['coordinates'][0]))
+        elif geometry['type'] == 'Point' and properties.get('type') == "dynamic_obstacle":
+            shape = properties.get('shape', '正方形')
+            position = tuple(geometry['coordinates'])
+            direction = tuple(properties.get('direction', (1, 0)))  # 默认方向为 (1, 0)
+            speed = properties.get('speed', 1.0)  # 默认速度为 1.0
+            size = properties.get('size', 20.0)  # 默认大小为 5.0
 
+            dynamic_obstacle = DynamicObstacle(shape, position, direction, speed, size)
+            dynamic_obstacles.append(dynamic_obstacle)
+
+    return Result_Demo(start=start_point, end=end_point, time=None, obstacles=obstacles,
+                       dynamic_obstacles=dynamic_obstacles, track=None,
+                       smoothness=None, pathlen=0)
 
 class Result_Demo:
     """
@@ -147,7 +185,18 @@ class Result_Demo:
         plt.gca().xaxis.tick_top()  # 将x轴刻度显示在上方
         plt.plot(a, b)
         return FigureCanvas(figure)
-
+    def draw_map(self):
+        """
+        画出路径
+        :return:
+        """
+        figure = plt.figure()
+        self.draw_end()
+        self.draw_start()
+        self.draw_obstacles()
+        plt.gca().invert_yaxis()
+        plt.gca().xaxis.tick_top()  # 将x轴刻度显示在上方
+        return FigureCanvas(figure)
     # -----------------------计算路径平滑度-----------------------------------
     def compute_curvature(self, x, y):
         """计算曲率"""

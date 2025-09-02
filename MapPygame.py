@@ -2,7 +2,7 @@ import math
 import re
 import sys
 import time
-from noise import pnoise2
+#from noise import pnoise2
 import numpy as np
 import pygame
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QFileDialog
@@ -28,10 +28,12 @@ from scipy.interpolate import splprep, splev
 from DynamicObstacle import DynamicObstacle
 from arithmetic.APF.apf import apf
 from arithmetic.APFRRT.APFRRT_dyn import APFRRT_dyn
+from arithmetic.APFRRT.dbvsAPFRRT import dbvsAPFRRT_dyn
 from arithmetic.Astar.Map import Map
 from arithmetic.Astar.astar import astar
 from arithmetic.RRT.BiRRT import BiRrt
 from arithmetic.RRT.RRTstar import RrtStar
+from arithmetic.RRT.costRRT import Cost_Rrt
 from arithmetic.RRT.rrt import Rrt
 
 from result import Result_Demo
@@ -316,6 +318,14 @@ class PygameWidget(QWidget):
         for point in self.result[:-1]:
             track.append((point.x, point.y))
         return track, time
+    def startDbvsPRrt(self):
+        self.plan_surface.fill(self.back_color)
+        self.result = None
+        self.result, time = dbvsAPFRRT_dyn(self).plan(self.plan_surface)
+        track = []
+        for point in self.result[:-1]:
+            track.append((point.x, point.y))
+        return track, time
     def startPRm(self):
         self.result = None
         self.result, time = prm(self).plan(self.plan_surface)
@@ -323,7 +333,14 @@ class PygameWidget(QWidget):
         for point in self.result[:-1]:
             track.append((point.x, point.y))
         return track, time
-
+    def startcostRrt(self):
+        self.plan_surface.fill(self.back_color)
+        self.result = None
+        self.result, time = Cost_Rrt(self).plan(self.plan_surface)
+        track = []
+        for point in self.result[:-1]:
+            track.append((point.x, point.y))
+        return track, time
     def save_result(self, time1, track, file_path):
         """
         保存结果文件，包括地图

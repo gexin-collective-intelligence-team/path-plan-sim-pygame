@@ -16,7 +16,7 @@ class RrtStar:
         self.obstacle = mapdata.obs_surface
         self.height = mapdata.height
         self.tree = []
-        self.step = 10
+        self.step = 15
         self.max_iterations = 10000
         self.radius = 20  # 搜索邻域半径
 
@@ -138,7 +138,7 @@ class RrtStar:
                     new_node.father = best_node
                     tree.append(new_node)
                     self.rewire(tree, new_node, nearby_nodes, min_cost,plan_surface)
-                if self.is_goal_reached(new_node, (self.end.x, self.end.y), 20):
+                if self.is_goal_reached(new_node, (self.end.x, self.end.y), 45):
                     path= [self.end, new_node]
                     current_node = new_node
                     pygame.draw.circle(plan_surface, (0, 100, 255), (current_node.x, current_node.y), 2)
@@ -156,8 +156,8 @@ class RrtStar:
                     end = time.time()
                     print("花费时间为")
                     print(end - start)
-                    print("总节点数为")
-                    print(self.node_count)
+                    print("总迭代次数为")
+                    print(i)
                     return path, end - start
                     # 绘图更新每隔100次迭代执行一次
 

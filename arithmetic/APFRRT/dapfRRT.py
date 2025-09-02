@@ -11,13 +11,12 @@ import pygame
 from shapely.ops import nearest_points
 
 from arithmetic.APFRRT.Node import point
-from shapely.strtree import STRtree
+
 
 class APFRRT_dyn():
     def __init__(self, mapdata):
-        self.predicted_positions = None
         self.safe_distance = 100
-        self.Predict_time = 0.3
+        self.Predict_time = 0.5
 
         self.start = point(mapdata.start_point[0], mapdata.start_point[1])  # 储存此次搜索的开始点
         self.end = point(mapdata.end_point[0], mapdata.end_point[1])  # 储存此次搜索的目的点
@@ -27,14 +26,12 @@ class APFRRT_dyn():
         self.width = mapdata.width
         self.height = mapdata.height
         self.obstacles = mapdata.obstacles  # 多边形障碍物顶点
-        self.ploobstacles = [Polygon(points) for points in mapdata.obstacles]
-        self.obstacle_tree = STRtree(self.ploobstacles)
         self.dynamic_obstacles = mapdata.dynamic_obstacles  #动态障碍物
         # 全局障碍物信息
         self.obstacle = mapdata.obs_surface
         # APF参数
         self.attraction_coeff = 5.0  # 吸引力系数
-        self.repulsion_coeff = 5000.0  # 斥力系数
+        self.repulsion_coeff = 2000.0  # 斥力系数
         self.repulsion_threshold = 300  # 斥力作用距离阈值
         # 检测震荡参数
         self.position_history = []  # 用于存储历史位置的列表
@@ -43,10 +40,10 @@ class APFRRT_dyn():
         # RRT参数
         # self.step = 10
         self.tree = []
-        self.step = 10
+        self.step = 15
         #一次最大采样数
-        self.n_max = 5
-        self.n_min = 1
+        self.n_max = 10
+        self.n_min = 3
         # 最大迭代次数
         self.max_iterations = 10000
         # 动态调整参数
@@ -77,113 +74,113 @@ class APFRRT_dyn():
 
     # 计算随机点引力
 
-    # def calculate_Randgradient(self, current_point, rand_point):
-    #     # 动态调整引力系数
-    #     #self.update_attraction_coeff(current_point)
-    #     # 根据人工势场计算当前位置的梯度向量
-    #     dx = rand_point.x - current_point.x
-    #     dy = rand_point.y - current_point.y
-    #     distance_to_goal = math.sqrt(dx ** 2 + dy ** 2)
-    #     if distance_to_goal > 0:
-    #         gradient_x = dx / distance_to_goal * self.attraction_coeff
-    #         gradient_y = dy / distance_to_goal * self.attraction_coeff
-    #     else:
-    #         gradient_x = gradient_y = 0
-    #     return gradient_x, gradient_y
+    def calculate_Randgradient(self, current_point, rand_point):
+        # 动态调整引力系数
+        #self.update_attraction_coeff(current_point)
+        # 根据人工势场计算当前位置的梯度向量
+        dx = rand_point.x - current_point.x
+        dy = rand_point.y - current_point.y
+        distance_to_goal = math.sqrt(dx ** 2 + dy ** 2)
+        if distance_to_goal > 0:
+            gradient_x = dx / distance_to_goal * self.attraction_coeff
+            gradient_y = dy / distance_to_goal * self.attraction_coeff
+        else:
+            gradient_x = gradient_y = 0
+        return gradient_x, gradient_y
 
-    # #计算引力
-    # def calculate_gradient(self, current_point):
-    #     # 动态调整引力系数
-    #     self.update_attraction_coeff(current_point)
-    #     # 根据人工势场计算当前位置的梯度向量
-    #     dx = self.end.x - current_point.x
-    #     dy = self.end.y - current_point.y
-    #     distance_to_goal = math.sqrt(dx ** 2 + dy ** 2)
-    #     if distance_to_goal > 0:
-    #         gradient_x = dx / distance_to_goal * self.attraction_coeff
-    #         gradient_y = dy / distance_to_goal * self.attraction_coeff
-    #     else:
-    #         gradient_x = gradient_y = 0
-    #     return gradient_x, gradient_y
+    #计算引力
+    def calculate_gradient(self, current_point):
+        # 动态调整引力系数
+        self.update_attraction_coeff(current_point)
+        # 根据人工势场计算当前位置的梯度向量
+        dx = self.end.x - current_point.x
+        dy = self.end.y - current_point.y
+        distance_to_goal = math.sqrt(dx ** 2 + dy ** 2)
+        if distance_to_goal > 0:
+            gradient_x = dx / distance_to_goal * self.attraction_coeff
+            gradient_y = dy / distance_to_goal * self.attraction_coeff
+        else:
+            gradient_x = gradient_y = 0
+        return gradient_x, gradient_y
 
-    # #计算斥力
-    # def calculate_repulsion(self, current_point):
-    #     # 动态调整斥力系数
-    #     self.update_repulsion_coeff(current_point)
-    #     # 根据障碍物斥力计算当前位置的斥力向量
-    #     force_x = force_y = 0.0
-    #     closest_distance = float('inf')  # 初始化最近距离为无穷大
-    #     for obstacle in self.obstacles:
-    #         # 多边形
-    #         obs = Polygon(obstacle)
-    #         # 当前点
-    #         pos = Point(current_point.x, current_point.y)
-    #         # if obs.contains(pos):
-    #         #     continue
-    #         # 寻找最近的障碍物点
-    #         nearest_pt = nearest_points(pos, obs)[1]
-    #         # 计算障碍物距离
-    #         distance_to_obstacle = pos.distance(obs)
-    #         force = 0
-    #         # 如果距离小于障碍物影响范围
-    #         if distance_to_obstacle < self.repulsion_threshold:
-    #
-    #             if distance_to_obstacle < closest_distance:
-    #                 closest_distance = distance_to_obstacle
-    #             # 计算机器人当前位置指向障碍物边界的单位向量
-    #             dx = nearest_pt.x - current_point.x
-    #             dy = nearest_pt.y - current_point.y
-    #             distance = math.sqrt(dx ** 2 + dy ** 2)
-    #             if distance > 0:
-    #                 dx /= distance
-    #                 dy /= distance
-    #                 force = self.repulsion_coeff * (1.0 / distance_to_obstacle - 1.0 / self.repulsion_threshold) / (
-    #                         distance_to_obstacle ** 2)
-    #             # 计算斥力的大小
-    #             else:
-    #                 force_x -= 0
-    #                 force_y -= 0
-    #
-    #             # 累积斥力的分量
-    #             force_x -= force * dx
-    #             force_y -= force * dy
-    #     if closest_distance < 60:
-    #         self.repulsion_coeff += 6000 * (60 - closest_distance) / (60 - 20)
-    #         self.step = max(5, self.step - 1)  # 举例：减小步长
-    #
-    #     else:
-    #         self.step = min(20, self.step + 5)  # 举例：增加步长
-    #         # 处理动态障碍物的斥力
-    #     for dynamic_obstacle in self.dynamic_obstacles:
-    #         # 获取动态障碍物的位置和速度
-    #         pos = Point(current_point.x, current_point.y)
-    #         obs_position = Point(dynamic_obstacle.position)
-    #
-    #         #速度向量
-    #         obs_velocity = (dynamic_obstacle.direction[0] * dynamic_obstacle.speed,
-    #                         dynamic_obstacle.direction[1] * dynamic_obstacle.speed)
-    #
-    #         # 预测动态障碍物的未来位置
-    #         predicted_position = Point(
-    #             obs_position.x + obs_velocity[0] * self.time_step,
-    #             obs_position.y + obs_velocity[1] * self.time_step,
-    #         )
-    #         # 获取威胁等级
-    #         threat_level = self.calculate_threat_level(dynamic_obstacle, pos)
-    #         distance_to_obstacle = pos.distance(predicted_position)
-    #
-    #         if distance_to_obstacle < self.safe_distance:
-    #             distance_to_obstacle = self.safe_distance  # 防止距离过小导致斥力过大
-    #         # 计算单位向量
-    #         dx = predicted_position.x - current_point.x
-    #         dy = predicted_position.y - current_point.y
-    #         # 计算斥力
-    #         repulsion_strength = threat_level * (1 / distance_to_obstacle ** 2)
-    #
-    #         force_x -= repulsion_strength * (dx / distance_to_obstacle)
-    #         force_y -= repulsion_strength * (dy / distance_to_obstacle)
-    #
-    #     return force_x, force_y
+    #计算斥力
+    def calculate_repulsion(self, current_point):
+        # 动态调整斥力系数
+        self.update_repulsion_coeff(current_point)
+        # 根据障碍物斥力计算当前位置的斥力向量
+        force_x = force_y = 0.0
+        closest_distance = float('inf')  # 初始化最近距离为无穷大
+        for obstacle in self.obstacles:
+            # 多边形
+            obs = Polygon(obstacle)
+            # 当前点
+            pos = Point(current_point.x, current_point.y)
+            # if obs.contains(pos):
+            #     continue
+            # 寻找最近的障碍物点
+            nearest_pt = nearest_points(pos, obs)[1]
+            # 计算障碍物距离
+            distance_to_obstacle = pos.distance(obs)
+            force = 0
+            # 如果距离小于障碍物影响范围
+            if distance_to_obstacle < self.repulsion_threshold:
+
+                if distance_to_obstacle < closest_distance:
+                    closest_distance = distance_to_obstacle
+                # 计算机器人当前位置指向障碍物边界的单位向量
+                dx = nearest_pt.x - current_point.x
+                dy = nearest_pt.y - current_point.y
+                distance = math.sqrt(dx ** 2 + dy ** 2)
+                if distance > 0:
+                    dx /= distance
+                    dy /= distance
+                    force = self.repulsion_coeff * (1.0 / distance_to_obstacle - 1.0 / self.repulsion_threshold) / (
+                            distance_to_obstacle ** 2)
+                # 计算斥力的大小
+                else:
+                    force_x -= 0
+                    force_y -= 0
+
+                # 累积斥力的分量
+                force_x -= force * dx
+                force_y -= force * dy
+        if closest_distance < 60:
+            self.repulsion_coeff += 6000 * (60 - closest_distance) / (60 - 20)
+            self.step = max(5, self.step - 1)  # 举例：减小步长
+
+        else:
+            self.step = min(20, self.step + 5)  # 举例：增加步长
+            # 处理动态障碍物的斥力
+        for dynamic_obstacle in self.dynamic_obstacles:
+            # 获取动态障碍物的位置和速度
+            pos = Point(current_point.x, current_point.y)
+            obs_position = Point(dynamic_obstacle.position)
+
+            #速度向量
+            obs_velocity = (dynamic_obstacle.direction[0] * dynamic_obstacle.speed,
+                            dynamic_obstacle.direction[1] * dynamic_obstacle.speed)
+
+            # 预测动态障碍物的未来位置
+            predicted_position = Point(
+                obs_position.x + obs_velocity[0] * self.time_step,
+                obs_position.y + obs_velocity[1] * self.time_step,
+            )
+            # 获取威胁等级
+            threat_level = self.calculate_threat_level(dynamic_obstacle, pos)
+            distance_to_obstacle = pos.distance(predicted_position)
+
+            if distance_to_obstacle < self.safe_distance:
+                distance_to_obstacle = self.safe_distance  # 防止距离过小导致斥力过大
+            # 计算单位向量
+            dx = predicted_position.x - current_point.x
+            dy = predicted_position.y - current_point.y
+            # 计算斥力
+            repulsion_strength = threat_level * (1 / distance_to_obstacle ** 2)
+
+            force_x -= repulsion_strength * (dx / distance_to_obstacle)
+            force_y -= repulsion_strength * (dy / distance_to_obstacle)
+
+        return force_x, force_y
 
 
 
@@ -227,123 +224,64 @@ class APFRRT_dyn():
         return max(threat_level, 0)  # 威胁等级最小为0
 
     def rand_point(self, current_point, plan_surface=None):
-        """
-        根据代价选择最佳候选点作为q_rand。
-        成本函数考虑到目标吸引距离和最近障碍物距离。
-        """
+        self.collFlag = False
+        # 根据人工势场梯度信息和斥力信息选择随机点
+        gradient_x, gradient_y = self.calculate_gradient(current_point)
+        repulsion_x, repulsion_y = self.calculate_repulsion(current_point)
 
-        goal_bias_prob = 0.2  # 目标偏置概率，可调
-        r = random.random()
-        if r < goal_bias_prob:
-            return point(self.end.x, self.end.y)  # 目标偏置：直接选择目标点
-        # 动态采样数量 N
-        N = int(self.n_max - (self.n_max - self.n_min) * self.node_count / self.max_iterations)
-        N = max(self.n_min, min(self.n_max, N))
-        candidates = []
-        costs = []
+        # 考虑势场影响和斥力影响，动态调整随机点的偏移量
+        total_force_x = gradient_x + repulsion_x
+        total_force_y = gradient_y + repulsion_y
+        random_x = 0
+        random_y = 0
+        magnitude = math.sqrt(total_force_x ** 2 + total_force_y ** 2)
+        if magnitude > 0 and (total_force_x > 1 or total_force_y > 1):
+            # 根据势场和斥力的合力方向调整随机点的偏移量
+            offset_factor = 0.8
+            # APF步长更大
+            random_x = (current_point.x + offset_factor * total_force_x * self.step * 0.15 * random.uniform(0.5, 1.0))
+            random_y = (current_point.y + offset_factor * total_force_y * self.step * 0.15 * random.uniform(0.5, 1.0))
+        # 如果即将或已陷入局部极小值
+        elif magnitude == 0 or total_force_x < 1 or total_force_y < 1:
+            self.falsecount += 1
+            # 如果尝使的次数变多，增加步长
+            if (self.falsecount >= 5):
+                self.step += 5
+                self.flag += 0.2
+                self.falsecount = 0
 
-        for _ in range(N):
-            x = random.uniform(0, self.width)
-            y = random.uniform(0, self.height)
-            candidates.append(point(x, y))
+            # 如果合力为0，随机选择一个点
+            random_x = random.uniform(0, self.width)
+            random_y = random.uniform(0, self.height)
 
-            # 绘制候选点
-            if plan_surface:
-                pygame.draw.circle(plan_surface, (0, 255, 0), (int(x), int(y)), 2)
-                QApplication.processEvents()
+        if random_x < 0 or random_x > self.width or random_y < 0 or random_y > self.height:
+            random_x = random.uniform(0, self.width)
+            random_y = random.uniform(0, self.height)
+            return point(random_x, random_y)
 
-        def compute_cost(p):
-            dist_goal = self.distance(p, self.end)
-            point_geom = Point(p.x, p.y)
-            # 创建一个 buffer 区域（比如 100 px）
-            buffer = point_geom.buffer(100)
-            nearby_indices = self.obstacle_tree.query(buffer)  # 返回索引
-            nearby_geoms = [self.obstacle_tree.geometries[i] for i in nearby_indices]
-            #print("STRtree返回对象类型：", [type(obj) for obj in nearby_geoms])
-
-            if not nearby_geoms:
-                nearest_dist = self.safe_distance  # 或者 float('inf')
+        elif self.history_size >= 2 or self.collision((current_point.x, current_point.y), (random_x, random_y)):
+            print("随机点")
+            self.falsecount += 1
+            self.history_size = 0
+            q = 0.4
+            r = random.uniform(0, 1)
+            if (r > q):
+                random_x, random_y = self.random_nodes(current_point, self.flag)
             else:
-                nearest_dist = min(
-                    poly.distance(point_geom)
-                    for poly in nearby_geoms
-                    if isinstance(poly, Polygon)
-                )
+                random_x = random.uniform(0, self.width)
+                random_y = random.uniform(0, self.height)
 
+        return point(random_x, random_y)
 
-            return dist_goal + (1 / (nearest_dist + 1e-3))
-
-        q_rand = min(candidates, key=compute_cost)
-        return q_rand
-
-    def compute_force(self, q_near, q_rand):
-        """
-        基于 q_near 到 q_rand 的方向，计算引力 + 静态/动态障碍物斥力，返回总合力向量
-        """
-        total_x = total_y = 0.0
-
-        # ---- 引力部分：目标点 + 候选点 ----
-        def attractive_force(target, coeff):
-            dx = target.x - q_near.x
-            dy = target.y - q_near.y
-            dist = math.hypot(dx, dy)
-            if dist < 1e-6:
-                return 0.0, 0.0
-            return coeff * dx / dist, coeff * dy / dist
-
-        # 引力合成（候选点和目标点）
-        att_x1, att_y1 = attractive_force(q_rand, self.attraction_coeff)
-        att_x2, att_y2 = attractive_force(self.end, self.attraction_coeff)
-        total_x += att_x1 + att_x2
-        total_y += att_y1 + att_y2
-
-        # 2. 静态斥力
-        rep_x, rep_y = 0.0, 0.0
-        for obs in self.obstacles:
-            poly = Polygon(obs)
-            nearest_pt = nearest_points(Point(q_near.x, q_near.y), poly)[1]
-            d = Point(q_near.x, q_near.y).distance(nearest_pt)
-            if d < self.repulsion_threshold:
-                repulsion = self.repulsion_coeff * (1.0 / (d+1e-6) - 1.0 / self.repulsion_threshold) / ((d+1e-6) ** 2)
-                direction_x = q_near.x - nearest_pt.x
-                direction_y = q_near.y - nearest_pt.y
-                norm = math.hypot(direction_x, direction_y)
-                if norm > 1e-6:
-                    rep_x += repulsion * direction_x / norm
-                    rep_y += repulsion * direction_y / norm
-
-        # 3. 动态斥力（带预测 & 威胁指数）
-        for obs, pred_pos in self.predicted_positions:
-            # pred_x = obs.position[0] + obs.direction[0] * obs.speed * self.Predict_time
-            # pred_y = obs.position[1] + obs.direction[1] * obs.speed * self.Predict_time
-            q_near_shapely = Point(q_near.x, q_near.y)
-            d = pred_pos.distance(q_near_shapely)
-            #d = math.hypot(pred_x - q_near.x, pred_y - q_near.y)
-            if d > 80:
-                continue
-            eta = self.calculate_threat_level(obs, q_near)
-            if d < self.safe_distance:
-                d = self.safe_distance
-            dx = q_near.x - pred_pos.x
-            dy = q_near.y - pred_pos.y
-            repulsion = eta * (1.0 / d ** 2)
-            rep_x += repulsion * dx / d
-            rep_y += repulsion * dy / d
-
-        # 合力向量
-        total_x +=   rep_x
-        total_y +=   rep_y
-        return total_x, total_y
-
-    # def random_nodes(self, current_point, flag):
-    #     #在一定半径内寻找
-    #     radius = self.step * flag  # 定义随机点的半径范围
-    #     angle = random.uniform(0, 2 * math.pi)
-    #     random_x = current_point.x + radius * math.cos(angle)
-    #     random_y = current_point.y + radius * math.sin(angle)
-    #     random_x = max(0, min(self.width, random_x))  # 确保随机点在界内
-    #     random_y = max(0, min(self.height, random_y))  # 确保随机点在界内
-    #     return random_x, random_y
+    def random_nodes(self, current_point, flag):
+        #在一定半径内寻找
+        radius = self.step * flag  # 定义随机点的半径范围
+        angle = random.uniform(0, 2 * math.pi)
+        random_x = current_point.x + radius * math.cos(angle)
+        random_y = current_point.y + radius * math.sin(angle)
+        random_x = max(0, min(self.width, random_x))  # 确保随机点在界内
+        random_y = max(0, min(self.height, random_y))  # 确保随机点在界内
+        return random_x, random_y
 
     def nearest_neighbor(self, tree, target_point):
         """
@@ -428,55 +366,43 @@ class APFRRT_dyn():
 
     def expand(self, tree, max_distance):
         """
-        使用采样+合力扩展策略生成新节点
+        扩展 RRT 树，添加一个新节点。
+
+        Args:
+        - tree: 表示树中节点的点列表。
+        - obstacles: 障碍物列表（如 pygame surfaces）。
+        - max_distance: 从最近节点扩展的最大距离。
+
+
+        Returns:
+        - new_node: 添加到树中的新节点，如果扩展失败则返回None。
         """
-        # 1. 采样一个随机点（包含目标偏置与成本策略）
-        q_rand = self.rand_point(tree[-1])
+        current_node = tree[-1]
+        # 1. 随机抽样一个点
+        random_point = self.rand_point(current_node)
+        # 2. 找到树中距离随机点最近的节点
+        nearest_node = self.nearest_neighbor(tree, (random_point.x, random_point.y))
 
-        # 2. 寻找最近节点
-        q_near = self.nearest_neighbor(tree, (q_rand.x, q_rand.y))
-        self.update_attraction_coeff(q_near)
-        self.update_repulsion_coeff(q_near)
+        # 3. 从最近节点向随机点扩展
+        new_node = self.steer(nearest_node, (random_point.x, random_point.y), max_distance)
+        new_node.father = nearest_node
+        # 4. 检查是否与障碍物发生碰撞
+        if self.collision((nearest_node.x, nearest_node.y), (new_node.x, new_node.y)):
+            random_point = self.rand_point(current_node)
+            # 2. 找到树中距离随机点最近的节点
+            nearest_node = self.nearest_neighbor(tree, (random_point.x, random_point.y))
+            #nearest_node = nearest_node.father
+            # 3. 从最近节点向随机点扩展
+            new_node = self.steer(nearest_node, (random_point.x, random_point.y), max_distance)
+            new_node.father = nearest_node
+            # 如果没有碰撞，则将新节点添加到树中
+        if not self.collision((nearest_node.x, nearest_node.y), (new_node.x, new_node.y)):
+            tree.append(new_node)
+            return new_node
+        else:
+            # 如果发生碰撞，则返回 None 表示扩展失败
 
-        # 3. 计算合力方向
-        force_x, force_y = self.compute_force(q_near, q_rand)
-        norm = math.hypot(force_x, force_y)
-        if norm < 1e-3:
-            for _ in range(5):  # 最多尝试5次逃逸
-                angle = random.uniform(0, 2 * math.pi)
-                escape_x = q_near.x + math.cos(angle) * max_distance
-                escape_y = q_near.y + math.sin(angle) * max_distance
-                q_escape = point(escape_x, escape_y)
-                q_escape.father = q_near
-                if not self.collision((q_near.x, q_near.y), (escape_x, escape_y)):
-                    tree.append(q_escape)
-                    return q_escape
-            return None  # 所有逃逸尝试失败
-
-        # 4. 沿合力方向扩展新节点
-        direction_x = force_x / norm
-        direction_y = force_y / norm
-        new_x = q_near.x + direction_x * max_distance
-        new_y = q_near.y + direction_y * max_distance
-        q_new = point(new_x, new_y)
-        q_new.father = q_near
-
-        # 5. 检查碰撞
-        if self.collision((q_near.x, q_near.y), (q_new.x, q_new.y)):
-            for _ in range(5):  # 最多尝试5次逃逸
-                angle = random.uniform(0, 2 * math.pi)
-                escape_x = q_near.x + math.cos(angle) * max_distance
-                escape_y = q_near.y + math.sin(angle) * max_distance
-                q_escape = point(escape_x, escape_y)
-                q_escape.father = q_near
-                if not self.collision((q_near.x, q_near.y), (escape_x, escape_y)):
-                    tree.append(q_escape)
-                    return q_escape
-            return None  # 所有逃逸尝试失败
-
-        # 6. 无碰撞，加入树并返回
-        tree.append(q_new)
-        return q_new
+            return None
 
     def collision(self, src, dst):
         """
@@ -613,12 +539,6 @@ class APFRRT_dyn():
         Returns:
         - path: 表示 RRT 算法找到的路径的点列表，如果找不到路径则返回空列表。
         """
-        self.predicted_positions = [
-            (obs, Point(
-                obs.position[0] + obs.direction[0] * obs.speed * self.Predict_time,
-                obs.position[1] + obs.direction[1] * obs.speed * self.Predict_time
-            )) for obs in self.dynamic_obstacles
-        ]
         start = time.time()
         # 使用起始节点初始化树
         tree = [self.start]
@@ -692,9 +612,9 @@ class APFRRT_dyn():
         print("未找到路径！！！")
         return [], end - start
 
-    # def calculate_velocity_factor(self, velocity, distance):
-    #     # 根据速度和距离计算动态斥力因子
-    #     speed = math.sqrt(velocity[0] ** 2 + velocity[1] ** 2)
-    #     if speed > 1.0:  # 根据障碍物速度大小，调整斥力因子
-    #         return 1 + speed / distance
-    #     return 1
+    def calculate_velocity_factor(self, velocity, distance):
+        # 根据速度和距离计算动态斥力因子
+        speed = math.sqrt(velocity[0] ** 2 + velocity[1] ** 2)
+        if speed > 1.0:  # 根据障碍物速度大小，调整斥力因子
+            return 1 + speed / distance
+        return 1

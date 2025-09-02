@@ -3,11 +3,12 @@ import time
 from random import random
 import pygame
 from PyQt5.QtWidgets import QApplication
-
+from shapely.geometry import Point, Polygon
+from shapely.ops import nearest_points
 from .Node import point
 
 
-class Rrt:
+class Cost_Rrt:
     def __init__(self, mapdata):
         self.start = point(mapdata.start_point[0], mapdata.start_point[1])
         self.end = point(mapdata.end_point[0], mapdata.end_point[1])
@@ -19,6 +20,8 @@ class Rrt:
         self.step = 15
         self.max_iterations = 10000
         self.node_count = 0
+        self.static_polygons = [Polygon(obs) for obs in mapdata.obstacles]
+        self.fail_count=0
 
     def rand_point(self):
         x = random() * self.width
@@ -47,6 +50,31 @@ class Rrt:
 
     def dist(self, p1, p2):
         return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+
+    #计算代价值
+    def compute_cost(self, q):
+        lambda1 = 1.0
+        lambda2 = 5.0
+        eps = 1e-6
+
+        goal_cost = self.dist((q.x, q.y), (self.end.x, self.end.y))
+        obs_dist = self.dist_to_nearest_obstacle(q)
+        if obs_dist < 30:
+            return 1e6
+        obstacle_cost = 1.0 / (obs_dist + eps)
+
+        return lambda1 * goal_cost + lambda2 * obstacle_cost
+
+    #计算距离最近的障碍物距离
+    def dist_to_nearest_obstacle(self, q):
+        min_dist = float('inf')
+        q_point = Point(q.x, q.y)
+        for poly in self.static_polygons:  # 把障碍多边形存在 mapdata.static_polygons 中
+            nearest = nearest_points(q_point, poly)[1]
+            dist = q_point.distance(nearest)
+            if dist < min_dist:
+                min_dist = dist
+        return min_dist
 
     def steer(self, nearest_node, target_point, max_distance):
         """
@@ -105,7 +133,7 @@ class Rrt:
         distance_to_goal = self.dist((node.x, node.y), goal_point)
         return distance_to_goal <= tolerance
 
-    def expand(self, tree, max_distance):
+    def expand(self, tree, max_distance,plan_surface=None):
         """
         扩展 RRT 树，添加一个新节点。
 
@@ -117,22 +145,40 @@ class Rrt:
         Returns:
         - new_node: 添加到树中的新节点，如果扩展失败则返回None。
         """
-        # 1. 随机抽样一个点
-        random_point = self.rand_point()
+        self.fail_count += 1
+        if self.fail_count >= 5:
+            # 强制使用普通随机点采样
+            q_rand = self.rand_point()
+            self.fail_count = 0
+        else:
 
-        # 2. 找到树中距离随机点最近的节点
-        nearest_node = self.nearest_neighbor(tree, (random_point.x, random_point.y))
+            k = self.node_count
+            K = self.max_iterations
+            N_max = 5
+            N_min = 2
+            N = int(N_max - (N_max - N_min) * (k / K))
 
-        # 3. 从最近节点向随机点扩展
-        new_node = self.steer(nearest_node, (random_point.x, random_point.y), max_distance)
+            p_goal = 0.3  # 5% 概率直接选择目标点作为采样点
+            if random() < p_goal:
+                q_rand = self.end
+            else:
+                candidates = [self.rand_point() for _ in range(N)]
+
+                if plan_surface is not None:
+                    for c in candidates:
+                        pygame.draw.circle(plan_surface, (200, 200, 0), (int(c.x), int(c.y)), 2)  # 黄色点
+                    QApplication.processEvents()
+                costs = [self.compute_cost(q) for q in candidates]
+                q_rand = candidates[costs.index(min(costs))]
+
+        nearest_node = self.nearest_neighbor(tree, (q_rand.x, q_rand.y))
+        new_node = self.steer(nearest_node, (q_rand.x, q_rand.y), max_distance)
         new_node.father = nearest_node
-        # 4. 检查是否与障碍物发生碰撞
+
         if not self.collision((nearest_node.x, nearest_node.y), (new_node.x, new_node.y)):
-            # 如果没有碰撞，则将新节点添加到树中
             tree.append(new_node)
             return new_node
         else:
-            # 如果发生碰撞，则返回 None 表示扩展失败
             return None
 
     def collision(self, src, dst):
@@ -176,7 +222,10 @@ class Rrt:
         # 执行 RRT 迭代
         for i in range(max_iterations):
             # 1. 扩展树，添加一个新节点
-            new_node = self.expand(tree, max_distance)
+            new_node = self.expand(tree, max_distance,plan_surface)
+            if new_node is None:
+                i=i-1
+                continue
             self.node_count+=1
             # 2. 检查是否达到目标点
             if new_node and self.is_goal_reached(new_node, (self.end.x, self.end.y), 45):

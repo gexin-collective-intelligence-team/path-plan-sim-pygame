@@ -1,6 +1,7 @@
 import re
 import threading
 
+import geojson
 from PyQt5 import QtCore, QtGui, QtWidgets
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import QWidget, QMainWindow, QMessageBox, QApplication, QFileDialog, QLineEdit, QLabel, QSlider, \
@@ -8,7 +9,7 @@ from PyQt5.QtWidgets import QWidget, QMainWindow, QMessageBox, QApplication, QFi
 from AlgorithmList import AlgorithmList
 from GridWidget import GridWidget
 from MapPygame import PygameWidget
-from result import load_demo, Category_Demo, Category_Compare
+from result import load_demo, Category_Demo, Category_Compare, load_look
 
 
 class Ui_MainWindow(object):
@@ -369,6 +370,14 @@ class Ui_MainWindow(object):
         radio_button_RRTapf_dyn = QRadioButton("RRTAPFdyn", MainWindow)
         radio_button_RRTapf_dyn.setGeometry(560, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_RRTapf_dyn)
+        # dbvsapfrrt
+        radio_button_dbvspRRT = QRadioButton("dbvspRRT", MainWindow)
+        radio_button_dbvspRRT.setGeometry(620, 30, 80, 30)  # 设置单选按钮位置和大小
+        radio_button_group.addButton(radio_button_dbvspRRT)
+        # Cost-Aware RRT
+        radio_button_costRRT = QRadioButton("CostRRT", MainWindow)
+        radio_button_costRRT.setGeometry(700, 30, 80, 30)  # 设置位置和大小（x根据你的界面布局可调整）
+        radio_button_group.addButton(radio_button_costRRT)
         # 保存结果部分
         label_result = QLabel("是否保存结果:", MainWindow)
         label_result.setGeometry(30, 60, 80, 30)
@@ -429,7 +438,7 @@ class Ui_MainWindow(object):
         label_notice.setGeometry(80, 210, 150, 30)  # 设置标签位置和大小
 
         def on_button_click():
-            if not radio_button_astar.isChecked() and not radio_button_rrt.isChecked() and not radio_button_apf.isChecked() and not radio_button_RRTapf and not radio_button_PRM and not radio_button_BiRRT and not radio_button_RRTStar and not radio_button_RRTapf_dyn:
+            if not radio_button_astar.isChecked() and not radio_button_rrt.isChecked() and not radio_button_apf.isChecked() and not radio_button_RRTapf and not radio_button_PRM and not radio_button_BiRRT and not radio_button_RRTStar and not radio_button_RRTapf_dyn and not radio_button_dbvspRRT and not radio_button_costRRT :
                 label_notice.setText("请选择规划路径所用算法！")
                 return
             # 检测路径是否合法
@@ -469,6 +478,12 @@ class Ui_MainWindow(object):
                 elif radio_button_RRTapf_dyn.isChecked():
                     obstacle_overlap = "RRT-APF-Dyn"
                     track, time = grid_widget.startApfRrt_dyn()
+                elif radio_button_costRRT .isChecked():
+                    obstacle_overlap = "costRRT"
+                    track, time = grid_widget.startcostRrt()
+                elif radio_button_dbvspRRT.isChecked():
+                    obstacle_overlap = "dbvspRRT"
+                    track, time = grid_widget.startDbvsPRrt()
                 label_notice.setText("正在规划路径！")
                 # 保存结果部分
                 if radio_button_result_true.isChecked():
@@ -648,7 +663,34 @@ class Ui_MainWindow(object):
         main_widget.setLayout(layout)
         MainWindow.setCentralWidget(main_widget)
         MainWindow.show()
+    def map_look(self, MainWindow, grid_widget, index, f):
+        """
+        结果分析窗口设计
+        :param MainWindow: 当前窗体
+        :param grid_widget: grid_widget
+        :param index: 当前是选中的第几个文件，用于调整窗体显示的位置
+        :param f: 文件的路径
+        :return: None
+        """
+        MainWindow.setGeometry(100 + 10 * index, 100 + 10 * index, 500, 500)
+        r = load_look(f)
+        canvas = r.draw_map()
+        #button_smoothness = QPushButton("展示曲率")
+        button_save = QPushButton("保存图片")
 
+        def on_save_button_click():
+            file_path, _ = QFileDialog.getSaveFileName(MainWindow, "保存图片", "",
+                                                       "PNG Files (*.png);;JPEG Files (*.jpg)")
+            if file_path:
+                canvas.grab().save(file_path)
+        button_save.clicked.connect(on_save_button_click)
+        layout = QVBoxLayout()
+        layout.addWidget(canvas)
+        layout.addWidget(button_save)
+        main_widget = QWidget(MainWindow)
+        main_widget.setLayout(layout)
+        MainWindow.setCentralWidget(main_widget)
+        MainWindow.show()
     def result_category(self, MainWindow, grid_widget, category):
         """
         多次结果分析窗口设计
@@ -836,6 +878,11 @@ class Ui_MainWindow(object):
         self.pushButton_modify_map.setGeometry(QtCore.QRect(640, 455, 80, 23))
         self.pushButton_modify_map.setObjectName("pushButton_modify_map")
         self.pushButton_modify_map.clicked.connect(self.modify_map)  # 方法
+        #预览地图
+        self.pushButton_look_map = QtWidgets.QPushButton(self.centralwidget)
+        self.pushButton_look_map.setGeometry(QtCore.QRect(640, 455, 80, 23))
+        self.pushButton_look_map.setObjectName("pushButton_look_map")
+        self.pushButton_look_map.clicked.connect(self.look_map)  # 方法
         # 输入起始点按钮
         self.pushButton_input_startAndEnd = QtWidgets.QPushButton(self.centralwidget)
         self.pushButton_input_startAndEnd.setGeometry(QtCore.QRect(640, 455, 80, 23))
@@ -988,6 +1035,8 @@ class Ui_MainWindow(object):
 
         self.sideToolBar.addWidget(self.pushButton_5)
         self.sideToolBar.addWidget(self.pushButton_modify_map)
+        self.sideToolBar.addWidget(self.pushButton_look_map)
+
         self.retranslateUi(MainWindow)
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
 
@@ -1034,6 +1083,24 @@ class Ui_MainWindow(object):
         new_window.setWindowTitle('随机障碍物')
         new_window.show()
         self.windows.append(new_window)  # 将新创建的窗口实例添加到列表中
+
+    def look_map(self):
+
+        # 创建文件对话框
+        dialog = QFileDialog()
+        # 设置对话框标题
+        dialog.setWindowTitle('打开结果文件')
+        # 设置文件过滤器
+        dialog.setNameFilter('Text Files (*.txt)')
+        # 设置默认文件名，包含文件类型后缀
+        # dialog.setDefaultSuffix('txt')
+        files, _ = dialog.getOpenFileNames()
+        for index, f in enumerate(files):  # 循环选中的所有文件
+            new_window = QtWidgets.QMainWindow()
+            ui.map_look(new_window, self.grid_widget, index, f)
+            new_window.setWindowTitle('地图预览')
+            new_window.show()
+            self.windows.append(new_window)  # 将新创建的窗口实例添加到列表中
     # 路径规划选择算法窗口
     def select_method(self):
         new_window = QtWidgets.QMainWindow()
@@ -1201,6 +1268,7 @@ class Ui_MainWindow(object):
         self.pushButton_paint_rand.setText(_translate("MainWindow", "图形障碍物"))
         self.pushButton_ob.setText(_translate("MainWindow", "参数障碍物"))
         self.pushButton_modify_map.setText(_translate("MainWindow", "地图调整"))
+        self.pushButton_look_map.setText(_translate("MainWindow", "预览地图"))
         self.pushButton_input_startAndEnd.setText(_translate("MainWindow", "输入起始点"))
         self.menu_ob.setTitle(_translate("MainWindow", "障碍物设置"))
         self.menu_startAndEnd.setTitle(_translate("MainWindow", "起始点设置"))

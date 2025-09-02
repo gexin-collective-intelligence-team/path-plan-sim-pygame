@@ -129,6 +129,8 @@ class BiRrt:
                             end_time = time.time()
 
                             print("花费时间为", end_time - start_time)
+                            print("总迭代次数为")
+                            print(i)
                             return path, end_time - start_time
             else:
                 new_node_end = self.expand(tree_end, max_distance)
@@ -150,8 +152,8 @@ class BiRrt:
 
                             end_time = time.time()
                             print("花费时间为", end_time - start_time)
-                            print("总节点数为")
-                            print(self.node_count)
+                            print("总迭代次数为")
+                            print(i)
                             #print(path)
                             return path, end_time - start_time
 
