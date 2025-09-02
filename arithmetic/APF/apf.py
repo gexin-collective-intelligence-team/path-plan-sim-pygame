@@ -29,6 +29,72 @@ class apf:
         self.position_history = []  # 用于存储历史位置的列表
         self.history_size = 100 #检测震荡时的点是否大于这个值
         self.oscillation_detection_threshold = 3  # 震荡检测阈值
+        self.stall_speed_eps = 0.1
+        self.stall_window = 25
+
+        # 分段吸引阈值（C¹ 连续）
+        self.attr_switch_dist = 80.0
+
+        # 斥力最大幅度（饱和防爆力）
+        self.repulsion_max = 150.0
+
+        # 切向引导强度（靠近障碍物时启用）
+        self.tangential_gain = 0.6
+
+        # 动量（0~1，大则更平滑）
+        self.momentum = 0.85
+        self.velocity = np.zeros(2, dtype=float)
+
+        # 自适应步长 & 上下限
+        self.base_step = 4.0
+        self.max_step = 10.0
+        self.min_step = 0.5
+
+        # 边界斥力设置
+        self.boundary_thresh = 80.0
+        self.boundary_gain = 600.0
+
+    # ---------- 工具 ----------
+    @staticmethod
+    def _norm(v):
+        n = np.linalg.norm(v)
+        return n if n > 1e-9 else 0.0
+
+    @staticmethod
+    def _unit(v):
+        n = np.linalg.norm(v)
+        if n < 1e-9:
+            return np.zeros_like(v)
+        return v / n
+
+    @staticmethod
+    def _rot90(v):
+        # 逆时针旋转 90°
+        return np.array([-v[1], v[0]], dtype=float)
+
+    def distance(self, p1, p2):
+        return math.hypot(p1.x - p2.x, p1.y - p2.y)
+
+    # ---------- 分段连续吸引力 ----------
+    def calculate_attraction(self, current_point):
+        dx = self.end.x - current_point.x
+        dy = self.end.y - current_point.y
+        d = math.hypot(dx, dy)
+        if d < 1e-9:
+            return 0.0, 0.0
+
+        # C¹ 连续：d <= d* 为二次势；d > d* 为线性势
+        if d <= self.attr_switch_dist:
+            # grad U = k * (q - q_goal)
+            fx = self.attraction_coeff * (dx)
+            fy = self.attraction_coeff * (dy)
+        else:
+            # grad U = k * d* * (q - q_goal)/||q - q_goal||
+            k = self.attraction_coeff * self.attr_switch_dist
+            ux, uy = dx / d, dy / d
+            fx = k * ux
+            fy = k * uy
+        return fx, fy
 
     def distance(self, point1, point2):
         # 计算两点直接的距离
@@ -48,36 +114,87 @@ class apf:
 
     def calculate_repulsion(self, current_point):
         # 计算斥力
-        force_x = force_y = 0.0
+        pos = Point(current_point.x, current_point.y)
+        Fx = Fy = 0.0
         for obstacle in self.obstacles:
-            #多边形
-            obs = Polygon(obstacle)
-            #当前点
-            pos = Point(current_point.x, current_point.y)
-            # if obs.contains(pos):
-            #     continue
-            #寻找最近的距离
-            nearest_pt = nearest_points(pos, obs)[1]
-            # 计算障碍物距离
-            distance_to_obstacle = pos.distance(obs)
+            poly = Polygon(obstacle)
+            # 最近点与距离
+            nearest_pt = nearest_points(pos, poly)[1]
+            d = pos.distance(poly)  # 到多边形（边界）的最小距离
 
-            # 如果距离小于障碍物影响范围
-            if distance_to_obstacle < self.repulsion_threshold:
-                # 计算机器人当前位置指向障碍物边界的单位向量
-                dx = nearest_pt.x - current_point.x
-                dy = nearest_pt.y - current_point.y
-                distance = math.sqrt(dx ** 2 + dy ** 2)
-                if distance > 0:
-                    dx /= distance
-                    dy /= distance
-                # 计算斥力的大小
-                force = self.repulsion_coeff * (1.0 / distance_to_obstacle - 1.0 / self.repulsion_threshold) / (
-                            distance_to_obstacle ** 2)
-                # 累积斥力的分量
-                force_x -= force * dx
-                force_y -= force * dy
-        return force_x, force_y
+            if d < 1e-6:
+                d = 1e-6  # 在障碍物上，防除零
 
+            if d < self.repulsion_threshold:
+                # 法向（从当前指向最近边界点）
+                nx = nearest_pt.x - current_point.x
+                ny = nearest_pt.y - current_point.y
+                n_vec = np.array([nx, ny], dtype=float)
+                n_hat = self._unit(n_vec)
+
+                # 经典斥力梯度（C¹）+ 饱和
+                # |F| = η * (1/d - 1/Q) * (1/d^2)
+                eta = self.repulsion_coeff
+                Q = self.repulsion_threshold
+                mag = eta * (1.0 / d - 1.0 / Q) / (d ** 2)
+                # 饱和到 repulsion_max，防止爆力
+                mag = self.repulsion_max * np.tanh(mag / self.repulsion_max)
+
+                Fx -= mag * n_hat[0]
+                Fy -= mag * n_hat[1]
+
+                # ---- 切向引导（绕行）----
+                # 取法向旋转 90° 的切向方向，选择更靠近目标的方向
+                t_hat_pos = self._unit(self._rot90(n_hat))
+                t_hat_neg = -t_hat_pos
+
+                # 选择能让“朝向目标的投影增加”的切向方向
+                goal_vec = np.array([self.end.x - current_point.x,
+                                     self.end.y - current_point.y], dtype=float)
+                cand1 = np.dot(t_hat_pos, self._unit(goal_vec))
+                cand2 = np.dot(t_hat_neg, self._unit(goal_vec))
+                t_hat = t_hat_pos if cand1 >= cand2 else t_hat_neg
+
+                # 切向权重随距离衰减（越近越强）
+                w_tan = self.tangential_gain * max(0.0, (self.repulsion_threshold - d) / self.repulsion_threshold)
+                Fx += w_tan * mag * t_hat[0]
+                Fy += w_tan * mag * t_hat[1]
+
+        return Fx, Fy
+
+        # ---------- 边界斥力（四围墙） ----------
+
+    def calculate_boundary_repulsion(self, current_point):
+        x, y = current_point.x, current_point.y
+        Fx = Fy = 0.0
+        # 到各墙的距离
+        d_left = max(1e-6, x)
+        d_right = max(1e-6, self.width - x)
+        d_bottom = max(1e-6, y)
+        d_top = max(1e-6, self.height - y)
+
+        def wall_force(d, nx, ny):
+            if d < self.boundary_thresh:
+                mag = self.boundary_gain * (1.0 / d - 1.0 / self.boundary_thresh) / (d ** 2)
+                mag = self.repulsion_max * np.tanh(mag / self.repulsion_max)
+                return -mag * nx, -mag * ny
+            return 0.0, 0.0
+
+        # 法向外指向墙面（我们需要把机器人推离墙）
+        fx, fy = wall_force(d_left, -1.0, 0.0)  # 左墙法向 (-1,0)，推向 +x
+        Fx += fx;
+        Fy += fy
+        fx, fy = wall_force(d_right, 1.0, 0.0)  # 右墙法向 (1,0)，推向 -x
+        Fx += fx;
+        Fy += fy
+        fx, fy = wall_force(d_bottom, 0.0, -1.0)  # 下墙法向 (0,-1)，推向 +y
+        Fx += fx;
+        Fy += fy
+        fx, fy = wall_force(d_top, 0.0, 1.0)  # 上墙法向 (0,1)，推向 -y
+        Fx += fx;
+        Fy += fy
+
+        return Fx, Fy
     def add_position_to_history(self, current_point):
         """记录当前位置到历史位置列表"""
         if len(self.position_history) >= self.history_size:
@@ -85,23 +202,18 @@ class apf:
         self.position_history.append((current_point.x, current_point.y))
 
     def detect_oscillation(self):
-        """检测震荡，如果发现震荡返回True"""
         if len(self.position_history) < self.history_size:
-            return False  # 历史记录未满，不进行检测
-
-        # 检测历史位置中是否有往返移动的模式
-        oscillation_detected = False
+            return False
+        # 连续小幅往返：相邻位移都很小
+        small_moves = 0
         for i in range(1, len(self.position_history)):
-            dx = self.position_history[-i][0] - self.position_history[-i - 1][0]
-            dy = self.position_history[-i][1] - self.position_history[-i - 1][1]
-            distance = math.sqrt(dx ** 2 + dy ** 2)
-            if distance < self.oscillation_detection_threshold:
-                oscillation_detected = True
+            x1, y1 = self.position_history[-i]
+            x0, y0 = self.position_history[-i - 1]
+            if math.hypot(x1 - x0, y1 - y0) < self.oscillation_detection_threshold:
+                small_moves += 1
             else:
-                oscillation_detected = False
-                break  # 一旦发现较大的移动就停止检测
-
-        return oscillation_detected
+                break
+        return small_moves > (0.8 * self.history_size)
 
     def escape_from_oscillation(self):
         """实施逃逸策略"""
@@ -173,51 +285,133 @@ class apf:
 
         filtered_path.append(path_points[-1])
         return filtered_path
-    def plan(self,plan_surface):
-        # 寻找路径的方法
+
+    def plan(self, plan_surface):
+        # 寻找路径的方法（已改进：用 shapely 计算最近障碍距离，避免之前的类型错误）
         current_point = self.start
+        self.result = []
+        self.velocity = np.zeros(2, dtype=float)
+        self.position_history = []
+        self.count = 0
+
         start_time = time.time()
-        while self.distance(current_point, self.end) > 1:
-            # 吸引力向量
-            attraction_x, attraction_y = self.calculate_attraction(current_point)
-            # 斥力向量
-            repulsion_x, repulsion_y = self.calculate_repulsion(current_point)
-            #边界斥力
-            boundary_repulsion_x, boundary_repulsion_y = self.calculate_repulsion(current_point)
+        while self.distance(current_point, self.end) > 1.0:
+            # 吸引 / 斥力 / 边界
+            ax, ay = self.calculate_attraction(current_point)
+            rx, ry = self.calculate_repulsion(current_point)
+            bx, by = self.calculate_boundary_repulsion(current_point)
 
-            # 合力向量
-            total_force_x = attraction_x + repulsion_x + boundary_repulsion_x
-            total_force_y = attraction_y + repulsion_y + boundary_repulsion_y
+            Fx = ax + rx + bx
+            Fy = ay + ry + by
+            F = np.array([Fx, Fy], dtype=float)
+            F_norm = self._norm(F)
 
-            # 确定下一步的位置
-            next_x = current_point.x + total_force_x
-            next_y = current_point.y + total_force_y
+            # 目标方向
+            goal_vec = np.array([self.end.x - current_point.x, self.end.y - current_point.y], dtype=float)
+            goal_dist = np.linalg.norm(goal_vec)
+            goal_dir = self._unit(goal_vec)
+
+            # ------- 正确计算当前点到最近障碍的距离（使用 shapely） -------
+            if self.obstacles:
+                pos = Point(current_point.x, current_point.y)
+                try:
+                    # 每个 obstacle 是顶点列表，Polygon(obs) 正确
+                    nearest_obs_dist = min(pos.distance(Polygon(obs)) for obs in self.obstacles)
+                except Exception:
+                    # 回退：如果obstacles格式异常，则用顶点距离近似计算
+                    min_d = float('inf')
+                    for obs in self.obstacles:
+                        for vx, vy in obs:
+                            min_d = min(min_d, math.hypot(current_point.x - vx, current_point.y - vy))
+                    nearest_obs_dist = min_d if min_d != float('inf') else float('inf')
+            else:
+                nearest_obs_dist = float('inf')
+
+            # SAFE_RADIUS：基于斥力影响半径（repulsion_threshold）
+            SAFE_RADIUS = 1.5 * self.repulsion_threshold
+
+            # 根据最近障碍距离选择模式：直推（无障碍）或避障（合力+动量）
+            if nearest_obs_dist > SAFE_RADIUS:
+                # === 无障碍模式：直推目标方向（清除横向分量） ===
+                step = np.clip(
+                    self.base_step * (0.7 + 0.3 * (goal_dist / max(1.0, self.attr_switch_dist))),
+                    self.min_step, self.max_step
+                )
+                desired_velocity = goal_dir * step
+
+                v_prev = self.velocity.copy()
+                proj_along = np.dot(v_prev, goal_dir) * goal_dir
+                blend_along = 0.3
+                self.velocity = blend_along * proj_along + (1.0 - blend_along) * desired_velocity
+
+            else:
+                # === 避障模式：合力 + 动量过滤 ===
+                if F_norm < 1e-9:
+                    step = self.min_step
+                    direction = np.zeros(2)
+                else:
+                    direction = F / F_norm
+                    step = np.clip(
+                        self.base_step * (0.5 + 0.5 * np.tanh(F_norm / 20.0)),
+                        self.min_step, self.max_step
+                    )
+
+                self.velocity = self.momentum * self.velocity + (1.0 - self.momentum) * (direction * step)
+
+                if np.linalg.norm(self.velocity) < self.stall_speed_eps:
+                    jitter = 0.8 * self.max_step * self._unit(
+                        np.array([random.uniform(-1, 1), random.uniform(-1, 1)], dtype=float)
+                    )
+                    self.velocity += jitter
+
+            # 接近目标：投影到目标方向并减速，避免冲过头
+            if goal_dist < max(5.0, 0.2 * self.attr_switch_dist):
+                self.velocity = np.dot(self.velocity, goal_dir) * goal_dir
+                self.velocity *= 0.5
+
+            # 再次卡死检测
+            if np.linalg.norm(self.velocity) < self.stall_speed_eps:
+                jitter = 0.8 * self.max_step * self._unit(
+                    np.array([random.uniform(-1, 1), random.uniform(-1, 1)], dtype=float)
+                )
+                self.velocity += jitter
+
+            # 更新位置
+            next_x = current_point.x + float(self.velocity[0])
+            next_y = current_point.y + float(self.velocity[1])
             next_point = point(next_x, next_y)
-            self.add_position_to_history(current_point)  # 更新历史位置
-            if self.detect_oscillation():  # 检测到震荡
-                print("陷入震荡...")
-                #next_x,next_y= self.escape_from_oscillation()  # 实施逃逸策略
-                break  # 退出循环
-            if self.distance(next_point,self.end)<10:
-                print ("成功规划！！")
-                self.result.append((self.end.x,self.end.y))
-                break;
-            next_point = point(next_x, next_y)
-            if next_point:
-                pygame.draw.circle(plan_surface, (0, 100, 255), (next_point.x, next_point.y), 2)
 
-                QApplication.processEvents()  # 强制Qt处理事件队列（重绘）
+            # 记录与振荡检测
+            self.add_position_to_history(current_point)
+            if self.detect_oscillation():
+                self.tangential_gain = min(1.2, self.tangential_gain + 0.15)
+                self.velocity += 0.3 * self.max_step * self._unit(
+                    np.array([random.uniform(-1, 1), random.uniform(-1, 1)], dtype=float)
+                )
+
+            # 到达判定
+            if self.distance(next_point, self.end) < 10.0:
+                self.result.append((self.end.x, self.end.y))
+                break
+
+            # 绘制与记录
+            if plan_surface is not None:
+                pygame.draw.circle(plan_surface, (0, 100, 255), (int(next_point.x), int(next_point.y)), 2)
+                from PyQt5.QtWidgets import QApplication
+                QApplication.processEvents()
+
             self.result.append((next_point.x, next_point.y))
             current_point = next_point
             self.count += 1
 
-            if self.count > 10000:  # 避免无限循环
-                print("没有可行路径或陷入局部极小值点！！！！！！！")
-                break;
+            if self.count > 10000:
+                print("没有可行路径或陷入局部极小值点。")
+                break
 
         end_time = time.time()
         filtered_path = self.remove_oscillations(self.result)
         smoothed_path = self.smooth_path(filtered_path)
-        print("花费时间为")
-        print(end_time - start_time)
-        return smoothed_path,end_time - start_time
+        print("花费时间为", end_time - start_time)
+        return smoothed_path, end_time - start_time
+
+
