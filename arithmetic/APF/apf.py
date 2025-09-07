@@ -4,6 +4,7 @@ import random
 
 import numpy as np
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout
+from shapely import affinity
 from shapely.geometry import Point, Polygon
 import pygame
 from shapely.ops import nearest_points
@@ -21,13 +22,14 @@ class apf:
         self.width = mapdata.width
         self.height = mapdata.height
         self.obstacles = mapdata.obstacles
+        self.dynamic_obstacles = mapdata.dynamic_obstacles  # 动态障碍物
         # 参数
         self.attraction_coeff = 5.0  # 吸引力系数
         self.repulsion_coeff = 1000.0  # 斥力系数
-        self.repulsion_threshold = 100 # 斥力作用距离阈值
-        self.obstacle = mapdata.obs_surface #多边形障碍物顶点
+        self.repulsion_threshold = 100  # 斥力作用距离阈值
+        self.obstacle = mapdata.obs_surface  # 多边形障碍物顶点
         self.position_history = []  # 用于存储历史位置的列表
-        self.history_size = 100 #检测震荡时的点是否大于这个值
+        self.history_size = 100  # 检测震荡时的点是否大于这个值
         self.oscillation_detection_threshold = 3  # 震荡检测阈值
         self.stall_speed_eps = 0.1
         self.stall_window = 25
@@ -75,6 +77,52 @@ class apf:
     def distance(self, p1, p2):
         return math.hypot(p1.x - p2.x, p1.y - p2.y)
 
+    def colregs_adjustment(self, current_point, velocity, safety_distance=5.0):
+        """
+        基于 COLREGs + CPA 的避碰调整
+        """
+        adjustment = np.zeros(2, dtype=float)
+        usv_pos = np.array([current_point.x, current_point.y])
+        usv_vel = velocity if np.linalg.norm(velocity) > 1e-6 else np.array([1.0, 0.0])
+
+        for obs in self.dynamic_obstacles:
+            obs_vel = np.array(obs.direction) * obs.speed
+            obs_pos = np.array(obs.position)
+
+            rel_pos = obs_pos - usv_pos      # 相对位置
+            rel_vel = obs_vel - usv_vel      # 相对速度
+
+            if np.linalg.norm(rel_vel) < 1e-6:  # 相对静止，无需避让
+                continue
+
+            # 计算 CPA (最近点距离)
+            t_cpa = -np.dot(rel_pos, rel_vel) / (np.linalg.norm(rel_vel) ** 2)
+            if t_cpa < 0:
+                continue  # 最近点发生在过去，无需处理
+
+            cpa_pos = rel_pos + t_cpa * rel_vel
+            dist_cpa = np.linalg.norm(cpa_pos)
+
+            if dist_cpa < safety_distance:  # 触发避让
+                bearing = math.degrees(math.atan2(rel_pos[1], rel_pos[0]))
+                heading = math.degrees(math.atan2(usv_vel[1], usv_vel[0]))
+                angle_diff = (bearing - heading + 360) % 360
+
+                # 会遇
+                if 165 <= angle_diff <= 195:
+                    adjustment += np.array([usv_vel[1], -usv_vel[0]])  # 向右转
+                # 交叉
+                elif 0 < angle_diff < 180:  # 右舷
+                    adjustment += np.array([usv_vel[1], -usv_vel[0]]) * 1.5
+                else:  # 左舷
+                    adjustment += np.zeros(2)
+                # 追越
+                if 112.5 <= angle_diff <= 247.5:
+                    adjustment += np.array([usv_vel[1], -usv_vel[0]]) * 1.2
+
+        return adjustment
+
+
     # ---------- 分段连续吸引力 ----------
     def calculate_attraction(self, current_point):
         dx = self.end.x - current_point.x
@@ -106,8 +154,8 @@ class apf:
         dy = self.end.y - current_point.y
         distance_to_goal = self.distance(current_point, self.end)
         if distance_to_goal > 0:
-            force_x =  dx / distance_to_goal*self.attraction_coeff
-            force_y = dy / distance_to_goal*self.attraction_coeff
+            force_x = dx / distance_to_goal * self.attraction_coeff
+            force_y = dy / distance_to_goal * self.attraction_coeff
         else:
             force_x = force_y = 0
         return force_x, force_y
@@ -195,6 +243,7 @@ class apf:
         Fy += fy
 
         return Fx, Fy
+
     def add_position_to_history(self, current_point):
         """记录当前位置到历史位置列表"""
         if len(self.position_history) >= self.history_size:
@@ -230,7 +279,7 @@ class apf:
 
         return escape_x, escape_y
 
-    def smooth_path(self,path_points):
+    def smooth_path(self, path_points):
         """
         Smooth the given path points using B-spline.
 
@@ -253,7 +302,25 @@ class apf:
         smoothed_path = [(x_new[i], y_new[i]) for i in range(len(x_new))]
         return smoothed_path
 
-    def remove_oscillations(self,path_points, angle_threshold=0.1):
+    def get_dynamic_obstacle_distance(self, current_point, t_future=1.0):
+        """
+        计算当前点到最近动态障碍物（预测未来位置）的距离
+        """
+        pos = Point(current_point.x, current_point.y)
+        min_dist = float('inf')
+
+        for obs in self.dynamic_obstacles:
+            future_center = obs.predict_future_position(t_future)
+            poly = Polygon(obs.to_polygon())  # 基于当前位置的多边形
+            poly_shifted = affinity.translate(poly,
+                                              xoff=future_center.x - obs.position[0],
+                                              yoff=future_center.y - obs.position[1])
+            dist = pos.distance(poly_shifted)
+            min_dist = min(min_dist, dist)
+
+        return min_dist
+
+    def remove_oscillations(self, path_points, angle_threshold=0.1):
         """
         Remove oscillations from the path by detecting and removing points with high angle changes.
 
@@ -286,6 +353,18 @@ class apf:
         filtered_path.append(path_points[-1])
         return filtered_path
 
+    def detect_potential_collision(self, point, velocity, safe_dist=5.0):
+        """
+        判断当前位置在未来一段时间内是否可能发生碰撞
+        """
+        for obs in self.dynamic_obstacles:
+            future_pos = obs.predict_future_position(5.0)
+            dist = np.linalg.norm(np.array([future_pos.x - point.x,
+                                            future_pos.y - point.y]))
+            if dist < safe_dist:  # 距离过近，判定有风险
+                return True
+        return False
+
     def plan(self, plan_surface):
         # 寻找路径的方法（已改进：用 shapely 计算最近障碍距离，避免之前的类型错误）
         current_point = self.start
@@ -304,6 +383,15 @@ class apf:
             Fx = ax + rx + bx
             Fy = ay + ry + by
             F = np.array([Fx, Fy], dtype=float)
+            if self.detect_potential_collision(current_point, self.velocity):
+                colregs_F = self.colregs_adjustment(
+                    current_point,
+                    self.velocity,
+                    safety_distance=getattr(self, "colregs_horizon", 5.0)
+                )
+                # --- 方式1：加权融合，而不是直接叠加 ---
+                F = 0.8 * F + 0.2 * colregs_F
+            #F += self.colregs_adjustment(current_point, self.velocity, t_future=getattr(self, "colregs_horizon", 5.0))
             F_norm = self._norm(F)
 
             # 目标方向
@@ -312,20 +400,17 @@ class apf:
             goal_dir = self._unit(goal_vec)
 
             # ------- 正确计算当前点到最近障碍的距离（使用 shapely） -------
+            # ------- 计算到静态/动态障碍物的最近距离 -------
             if self.obstacles:
                 pos = Point(current_point.x, current_point.y)
-                try:
-                    # 每个 obstacle 是顶点列表，Polygon(obs) 正确
-                    nearest_obs_dist = min(pos.distance(Polygon(obs)) for obs in self.obstacles)
-                except Exception:
-                    # 回退：如果obstacles格式异常，则用顶点距离近似计算
-                    min_d = float('inf')
-                    for obs in self.obstacles:
-                        for vx, vy in obs:
-                            min_d = min(min_d, math.hypot(current_point.x - vx, current_point.y - vy))
-                    nearest_obs_dist = min_d if min_d != float('inf') else float('inf')
+                nearest_static_dist = min(pos.distance(Polygon(obs)) for obs in self.obstacles)
             else:
-                nearest_obs_dist = float('inf')
+                nearest_static_dist = float('inf')
+
+                # 动态障碍物距离：未来位置
+            lookahead_t = getattr(self, "dyn_predict_dt", 0.3)  # 预测 1 秒，可调 0.5~3.0
+            nearest_dynamic_dist = self.get_dynamic_obstacle_distance(current_point, t_future=lookahead_t)
+            nearest_obs_dist = min(nearest_static_dist, nearest_dynamic_dist)
 
             # SAFE_RADIUS：基于斥力影响半径（repulsion_threshold）
             SAFE_RADIUS = 1.5 * self.repulsion_threshold
@@ -413,5 +498,3 @@ class apf:
         smoothed_path = self.smooth_path(filtered_path)
         print("花费时间为", end_time - start_time)
         return smoothed_path, end_time - start_time
-
-

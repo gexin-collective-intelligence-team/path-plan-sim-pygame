@@ -889,6 +889,7 @@ class Ui_MainWindow(object):
         self.pushButton_input_startAndEnd.setObjectName("pushButton_input_startAndEnd")
         self.pushButton_input_startAndEnd.clicked.connect(self.startAndEnd)  # 方法
         self.actionCreate = QtWidgets.QAction(MainWindow)
+
         self.actionCreate.setObjectName("actionCreate")
         # 点击菜单连接方法
         self.actionCreate.triggered.connect(self.openNewWindow)
@@ -929,6 +930,15 @@ class Ui_MainWindow(object):
         self.pushButton_dynamic_ob.clicked.connect(self.handle_dynamic_ob)  # 绑定点击事件
         #self.pushButton_dynamic_ob.setStyleSheet("background-color: yellow;")  # 设置背景色以便观察
         #self.pushButton_dynamic_ob.setVisible(True)  # 确保按钮可见
+         # 新增：实时模拟按钮
+        self.btn_realtime_sim = QtWidgets.QPushButton(self.centralwidget)
+        self.btn_realtime_sim.setGeometry(QtCore.QRect(730, 454, 80, 25))  # 设置按钮的位置和大小
+        self.btn_realtime_sim.setObjectName("btn_realtime_sim")
+        self.btn_realtime_sim.setText("实时航行")  # 设置按钮的文字
+        self.btn_realtime_sim.clicked.connect(self.start_realtime_simulation)  # 绑定点击事件
+        # self.pushButton_dynamic_ob.setStyleSheet("background-color: yellow;")  # 设置背景色以便观察
+        # self.pushButton_dynamic_ob.setVisible(True)  # 确保按钮可见
+
         # 下载地图模板
         self.actionArithmeticList = QtWidgets.QAction(MainWindow)
         self.actionArithmeticList.setObjectName("actionArithmeticList")
@@ -1032,13 +1042,14 @@ class Ui_MainWindow(object):
         self.sideToolBar.addWidget(self.pushButton_paint_rand)
         self.sideToolBar.addWidget(self.pushButton_ob)
         self.sideToolBar.addWidget(self.pushButton_dynamic_ob)
-
+        self.sideToolBar.addWidget(self.btn_realtime_sim)  # 添加开始实时航行按钮
         self.sideToolBar.addWidget(self.pushButton_5)
         self.sideToolBar.addWidget(self.pushButton_modify_map)
         self.sideToolBar.addWidget(self.pushButton_look_map)
 
         self.retranslateUi(MainWindow)
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
+
 
     def handle_dynamic_ob(self):
         # 创建一个新的窗口
@@ -1286,6 +1297,10 @@ class Ui_MainWindow(object):
         self.action_get.setText(_translate("MainWindow", "获取图形"))
         self.action_rasterization.setText(_translate("MainWindow", "栅格化"))
     # 路径规划
+    def start_realtime_simulation(self):
+        """启动实时模拟"""
+        self.grid_widget.plan_surface.fill((255, 255, 255))
+        self.grid_widget.start_realtime_simulation()
     def startPath(self):
         self.grid_widget.plan_surface.fill((255, 255, 255))
         if not self.grid_widget.obstacles or not self.grid_widget.start_point or not self.grid_widget.end_point:

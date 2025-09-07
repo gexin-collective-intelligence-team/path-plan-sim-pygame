@@ -84,7 +84,102 @@ def draw_line(surface, color, start_pos, end_pos, radius):
         y = int(start_pos[1] + float(i) / distance * dy)
         pygame.draw.circle(surface, color, (x, y), radius)
 
+class USVMotionSimulator:
+    """无人船实时运动模拟器"""
+    def __init__(self, pygame_widget):
+        self.widget = pygame_widget
+        self.current_pos = None
+        self.target_pos = None
+        self.velocity = np.zeros(2)
+        self.path = []
+        self.path_index = 0
+        self.is_moving = False
 
+        # 船舶参数
+        self.max_speed = 10.0  # 最大速度
+        self.turn_rate = 0.1  # 转向率
+        self.ship_radius = 8  # 船舶半径
+
+        # 动画定时器
+        self.motion_timer = QTimer()
+        self.motion_timer.timeout.connect(self.update_position)
+        # 延迟启动定时器，避免初始化冲突
+        QTimer.singleShot(100, lambda: self.motion_timer.start(20))  # 50FPS，更流畅
+
+    def start_journey(self, start_pos, target_pos, planned_path):
+        """开始航行"""
+        self.current_pos = np.array(start_pos, dtype=float)
+        self.target_pos = target_pos
+        self.path = planned_path
+        self.path_index = 0
+        self.is_moving = True
+        print(f"开始航行！起点: {start_pos}, 终点: {target_pos}, 路径点数: {len(planned_path)}")
+        print(f"定时器状态: {self.motion_timer.isActive()}")
+        if not self.motion_timer.isActive():
+            self.motion_timer.start(50)
+            print("定时器已启动")
+
+    def update_position(self):
+        """实时更新船舶位置"""
+        if not self.is_moving or self.path_index >= len(self.path):
+            return
+
+        target_point = self.path[self.path_index]
+        direction = np.array(target_point) - self.current_pos
+        distance = np.linalg.norm(direction)
+
+        if distance < 5:  # 到达当前路径点
+            self.path_index += 1
+            if self.path_index >= len(self.path):
+                self.is_moving = False
+                print("航行完成！")
+                return
+            # 更新到下一个目标点
+            target_point = self.path[self.path_index]
+            direction = np.array(target_point) - self.current_pos
+            distance = np.linalg.norm(direction)
+
+        # 平滑移动
+        if distance > 0:
+            direction_norm = direction / distance
+            # 根据距离调整速度，但允许更高速度
+            speed_factor = min(1.5, distance / 30.0)  # 增大速度因子上限和敏感度
+            self.velocity = direction_norm * self.max_speed * max(0.3, speed_factor)  # 提高最小速度比例
+            self.current_pos += self.velocity
+            
+            # 打印调试信息
+            print(f"船舶位置: {self.current_pos}, 目标点: {target_point}, 距离: {distance:.2f}")
+        else:
+            self.velocity = np.zeros(2)
+
+        # 触发重绘
+        self.widget.update()
+
+    def draw_ship(self, surface):
+        """绘制船舶"""
+        if self.current_pos is None:
+            return
+
+        # 绘制船舶形状（三角形表示方向）
+        angle = np.arctan2(self.velocity[1], self.velocity[0])
+        points = self.get_ship_shape(self.current_pos, angle)
+        pygame.draw.polygon(surface, (0, 255, 255), points)
+
+        # 绘制航迹 - 确保至少有2个点
+        if len(self.path) > 1 and self.path_index > 0:
+            path_to_draw = self.path[:self.path_index+1]
+            if len(path_to_draw) >= 2:
+                pygame.draw.lines(surface, (0, 100, 255), False, path_to_draw, 2)
+
+    def get_ship_shape(self, pos, angle):
+        """获取船舶形状点"""
+        x, y = pos
+        size = self.ship_radius
+        return [
+            (x + size * np.cos(angle), y + size * np.sin(angle)),
+            (x + size * np.cos(angle + 2.5), y + size * np.sin(angle + 2.5)),
+            (x + size * np.cos(angle - 2.5), y + size * np.sin(angle - 2.5))
+        ]
 class PygameWidget(QWidget):
     BACK_COLOR = WHITE
     OBS_COLOR = BLACK
@@ -232,7 +327,44 @@ class PygameWidget(QWidget):
         self.offset_x = 0
         self.offset_x = 0
         self.result = None
+        # 新增：实时运动模拟器
+        self.motion_simulator = USVMotionSimulator(self)
 
+        # 新增：船舶运动图层
+        self.ship_surface = pygame.Surface((self.width, self.height))
+        self.ship_surface.set_colorkey(self.back_color)
+
+    def start_realtime_simulation(self):
+        """开始实时模拟"""
+        if not self.result or not self.start_point or not self.end_point:
+            self.main_window.printf("请先规划路径！")
+            return
+
+        # 统一路径格式为(x,y)元组列表
+        path_points = []
+        for point in self.result:
+            if hasattr(point, 'x') and hasattr(point, 'y'):
+                # 如果点是对象（有x,y属性）
+                path_points.append((point.x, point.y))
+            elif isinstance(point, (tuple, list)) and len(point) >= 2:
+                # 如果点是元组或列表
+                path_points.append((point[0], point[1]))
+            else:
+                # 其他情况，跳过
+                continue
+
+        if len(path_points) < 2:
+            self.main_window.printf("路径点数量不足，无法开始实时模拟！")
+            return
+
+        # 注意：不同算法的路径方向已在各自算法中处理，无需再反转
+        # 移除无条件的路径反转，避免方向错误
+
+        self.motion_simulator.start_journey(
+            self.start_point,
+            self.end_point,
+            path_points
+        )
     # A*算法
     def startAstar(self):
         self.result = None
@@ -722,17 +854,10 @@ class PygameWidget(QWidget):
         if self.grid:
             self.surface.blit(self.grid_surface, (0, 0))
 
-        # # 绘制障碍物
-        # for obstacle in self.obstacles:
-        #     pygame.draw.rect(screen, (0, 0, 0), (obstacle[0], obstacle[1], self.cell_size, self.cell_size), 0)
-        #
-        # # 绘制起始点和终点
-        # if self.start_point:
-        #     pygame.draw.rect(screen, (0, 255, 0),
-        #                      (self.start_point[0], self.start_point[1], self.cell_size, self.cell_size), 0)
-        # if self.end_point:
-        #     pygame.draw.rect(screen, (255, 0, 0),
-        #                      (self.end_point[0], self.end_point[1], self.cell_size, self.cell_size), 0)
+
+        # 绘制船舶
+        if hasattr(self, 'motion_simulator') and self.motion_simulator:
+            self.motion_simulator.draw_ship(self.surface)
 
         # 将pygame surface转换为QImage
         surface_string = pygame.image.tostring(self.surface, 'RGB')
