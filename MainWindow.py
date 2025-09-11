@@ -936,6 +936,22 @@ class Ui_MainWindow(object):
         self.btn_realtime_sim.setObjectName("btn_realtime_sim")
         self.btn_realtime_sim.setText("实时航行")  # 设置按钮的文字
         self.btn_realtime_sim.clicked.connect(self.start_realtime_simulation)  # 绑定点击事件
+        
+        # 新增：局部路径规划算法选择框
+        self.label_local_algorithm = QtWidgets.QLabel(self.centralwidget)
+        self.label_local_algorithm.setGeometry(QtCore.QRect(820, 454, 100, 25))
+        self.label_local_algorithm.setObjectName("label_local_algorithm")
+        self.label_local_algorithm.setText("局部算法:")
+        
+        self.combo_local_algorithm = QtWidgets.QComboBox(self.centralwidget)
+        self.combo_local_algorithm.setGeometry(QtCore.QRect(920, 454, 120, 25))
+        self.combo_local_algorithm.setObjectName("combo_local_algorithm")
+        self.combo_local_algorithm.addItem("无局部算法")
+        self.combo_local_algorithm.addItem("APF算法")
+        self.combo_local_algorithm.addItem("DWA算法")  # 预留，待实现
+        self.combo_local_algorithm.addItem("人工势场法")
+        self.combo_local_algorithm.addItem("动态窗口法")  # 预留，待实现
+        self.combo_local_algorithm.setCurrentIndex(0)  # 默认选择无局部算法
         # self.pushButton_dynamic_ob.setStyleSheet("background-color: yellow;")  # 设置背景色以便观察
         # self.pushButton_dynamic_ob.setVisible(True)  # 确保按钮可见
 
@@ -1043,6 +1059,8 @@ class Ui_MainWindow(object):
         self.sideToolBar.addWidget(self.pushButton_ob)
         self.sideToolBar.addWidget(self.pushButton_dynamic_ob)
         self.sideToolBar.addWidget(self.btn_realtime_sim)  # 添加开始实时航行按钮
+        self.sideToolBar.addWidget(self.label_local_algorithm)
+        self.sideToolBar.addWidget(self.combo_local_algorithm)
         self.sideToolBar.addWidget(self.pushButton_5)
         self.sideToolBar.addWidget(self.pushButton_modify_map)
         self.sideToolBar.addWidget(self.pushButton_look_map)
@@ -1300,6 +1318,14 @@ class Ui_MainWindow(object):
     def start_realtime_simulation(self):
         """启动实时模拟"""
         self.grid_widget.plan_surface.fill((255, 255, 255))
+        
+        # 获取当前选择的局部算法
+        local_algorithm = self.combo_local_algorithm.currentText()
+        
+        # 设置局部算法到运动模拟器
+        if hasattr(self.grid_widget, 'motion_simulator') and self.grid_widget.motion_simulator:
+            self.grid_widget.motion_simulator.set_local_algorithm(local_algorithm)
+        
         self.grid_widget.start_realtime_simulation()
     def startPath(self):
         self.grid_widget.plan_surface.fill((255, 255, 255))

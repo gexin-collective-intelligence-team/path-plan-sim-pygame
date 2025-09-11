@@ -43,6 +43,14 @@ from arithmetic.APFRRT.APFRRT import APFRRT
 
 from arithmetic.PRM.prm import prm
 
+# 导入局部路径规划模块
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from local_planner.local_planner_manager import LocalPlannerManager
+from local_planner.algorithms.apf_local_planner import APFLocalPlanner
+from local_planner.algorithms.dwa_local_planner import DWALocalPlanner
+
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
 RED=(255,0,0)
@@ -100,6 +108,23 @@ class USVMotionSimulator:
         self.turn_rate = 0.1  # 转向率
         self.ship_radius = 8  # 船舶半径
 
+        # 碰撞状态标记
+        self.has_collided = False
+        self.collision_position = None
+
+        # 局部路径规划管理器
+        self.local_planner_manager = LocalPlannerManager()
+        
+        # 注册可用的局部算法
+        self.local_planner_manager.register_algorithm("APF算法", APFLocalPlanner)
+        self.local_planner_manager.register_algorithm("DWA算法", DWALocalPlanner)
+        self.local_planner_manager.register_algorithm("人工势场法", APFLocalPlanner)
+        self.local_planner_manager.register_algorithm("动态窗口法", DWALocalPlanner)
+        
+        # 设置默认算法
+        self.local_algorithm = "无局部算法"
+        self.local_planner_manager.set_current_algorithm("无局部算法")
+
         # 动画定时器
         self.motion_timer = QTimer()
         self.motion_timer.timeout.connect(self.update_position)
@@ -108,16 +133,73 @@ class USVMotionSimulator:
 
     def start_journey(self, start_pos, target_pos, planned_path):
         """开始航行"""
+        # 重置碰撞状态
+        self.has_collided = False
+        self.collision_position = None
+        
         self.current_pos = np.array(start_pos, dtype=float)
         self.target_pos = target_pos
         self.path = planned_path
         self.path_index = 0
         self.is_moving = True
         print(f"开始航行！起点: {start_pos}, 终点: {target_pos}, 路径点数: {len(planned_path)}")
+        print(f"使用局部算法: {self.local_algorithm}")
         print(f"定时器状态: {self.motion_timer.isActive()}")
         if not self.motion_timer.isActive():
             self.motion_timer.start(50)
             print("定时器已启动")
+
+    def set_local_algorithm(self, algorithm_name):
+        """设置局部路径规划算法"""
+        self.local_algorithm = algorithm_name
+        self.local_planner_manager.set_current_algorithm(algorithm_name)
+        print(f"已设置局部路径规划算法为: {algorithm_name}")
+
+    def apply_local_algorithm(self, current_pos, target_pos, obstacles):
+        """应用局部路径规划算法"""
+        # 直接使用原始障碍物对象，无需格式转换
+        static_obstacles = []  # 静态障碍物目前为空
+        dynamic_obstacles = obstacles  # 动态障碍物直接使用原始对象
+        
+        # 使用局部路径规划管理器
+        return self.local_planner_manager.plan_local_path(
+            np.array(current_pos),
+            np.array(target_pos),
+            static_obstacles,
+            dynamic_obstacles,
+            self.velocity
+        )
+
+
+
+    def check_collision_with_dynamic_obstacles(self, ship_pos):
+        """检测船舶与动态障碍物的碰撞"""
+        ship_radius = self.ship_radius
+        
+        if hasattr(self.widget, 'dynamic_obstacles'):
+            for obstacle in self.widget.dynamic_obstacles:
+                # 计算船舶中心到障碍物中心的距离
+                obs_x, obs_y = obstacle.position
+                distance = np.sqrt((ship_pos[0] - obs_x)**2 + (ship_pos[1] - obs_y)**2)
+                
+                # 碰撞条件：距离小于船舶半径 + 障碍物半径
+                collision_distance = ship_radius + obstacle.size
+                
+                if distance < collision_distance:
+                    # 发生碰撞
+                    collision_info = {
+                        'ship_position': tuple(ship_pos),
+                        'obstacle_position': obstacle.position,
+                        'obstacle_shape': obstacle.shape,
+                        'obstacle_size': obstacle.size,
+                        'obstacle_direction': obstacle.direction,
+                        'obstacle_speed': obstacle.speed,
+                        'collision_distance': distance,
+                        'required_clearance': collision_distance
+                    }
+                    return True, collision_info
+        
+        return False, None
 
     def update_position(self):
         """实时更新船舶位置"""
@@ -125,30 +207,93 @@ class USVMotionSimulator:
             return
 
         target_point = self.path[self.path_index]
-        direction = np.array(target_point) - self.current_pos
+        
+        # 获取动态障碍物信息用于局部算法
+        obstacles = []
+        if hasattr(self.widget, 'dynamic_obstacles'):
+            obstacles = self.widget.dynamic_obstacles
+        
+        # 碰撞检测
+        collision_detected, collision_info = self.check_collision_with_dynamic_obstacles(self.current_pos)
+        if collision_detected:
+            print("🚨 碰撞检测！")
+            print(f"碰撞位置: {collision_info['ship_position']}")
+            print(f"障碍物位置: {collision_info['obstacle_position']}")
+            print(f"障碍物类型: {collision_info['obstacle_shape']}")
+            print(f"障碍物大小: {collision_info['obstacle_size']}")
+            print(f"障碍物方向: {collision_info['obstacle_direction']}")
+            print(f"障碍物速度: {collision_info['obstacle_speed']}")
+            print(f"实际距离: {collision_info['collision_distance']:.2f}")
+            print(f"安全距离: {collision_info['required_clearance']:.2f}")
+            print("算法终止运行！船舶已停止运动")
+            
+            # 停止算法运行，保持界面状态
+            self.is_moving = False
+            
+            # 停止定时器
+            if hasattr(self, 'motion_timer'):
+                self.motion_timer.stop()
+                print("运动定时器已停止")
+            
+            # 在界面上标记碰撞状态
+            self.has_collided = True
+            self.collision_position = self.current_pos.copy()
+            
+            # 触发重绘以显示碰撞状态
+            self.widget.update()
+            
+            # 返回，不再继续执行路径更新
+            return
+        
+        # 应用局部路径规划算法调整目标点
+        adjusted_target = self.apply_local_algorithm(self.current_pos, target_point, obstacles)
+        
+        direction = np.array(adjusted_target) - self.current_pos
         distance = np.linalg.norm(direction)
 
-        if distance < 5:  # 到达当前路径点
+        # 检查是否是最后一个路径点
+        is_final_target = (self.path_index == len(self.path) - 1)
+        
+        # 最后一个路径点使用更小的阈值
+        arrival_threshold = 2.0 if is_final_target else 3.0
+        
+        if distance < arrival_threshold:  # 到达当前路径点
             self.path_index += 1
             if self.path_index >= len(self.path):
+                # 确保船舶精确到达最终目标点
+                self.current_pos = np.array(self.path[-1])
                 self.is_moving = False
                 print("航行完成！")
                 return
-            # 更新到下一个目标点
+            # 更新到下一个目标点，并应用局部算法
             target_point = self.path[self.path_index]
-            direction = np.array(target_point) - self.current_pos
+            adjusted_target = self.apply_local_algorithm(self.current_pos, target_point, obstacles)
+            direction = np.array(adjusted_target) - self.current_pos
             distance = np.linalg.norm(direction)
 
         # 平滑移动
         if distance > 0:
             direction_norm = direction / distance
-            # 根据距离调整速度，但允许更高速度
-            speed_factor = min(1.5, distance / 30.0)  # 增大速度因子上限和敏感度
-            self.velocity = direction_norm * self.max_speed * max(0.3, speed_factor)  # 提高最小速度比例
-            self.current_pos += self.velocity
+            
+            # 动态速度调整：接近目标时减速
+            if distance < 10:
+                # 接近目标时线性减速
+                speed_factor = max(0.1, distance / 10.0)
+            else:
+                # 远离目标时保持正常速度
+                speed_factor = min(1.0, distance / 20.0)
+            
+            self.velocity = direction_norm * self.max_speed * speed_factor
+            
+            # 确保不会越过目标点
+            step_distance = np.linalg.norm(self.velocity)
+            if step_distance > distance:
+                self.current_pos = np.array(adjusted_target)
+            else:
+                self.current_pos += self.velocity
             
             # 打印调试信息
-            print(f"船舶位置: {self.current_pos}, 目标点: {target_point}, 距离: {distance:.2f}")
+            print(f"船舶位置: {self.current_pos}, 原始目标点: {target_point}, 调整后目标点: {adjusted_target}, 距离: {distance:.2f}, 局部算法: {self.local_algorithm}")
         else:
             self.velocity = np.zeros(2)
 
@@ -160,10 +305,28 @@ class USVMotionSimulator:
         if self.current_pos is None:
             return
 
-        # 绘制船舶形状（三角形表示方向）
-        angle = np.arctan2(self.velocity[1], self.velocity[0])
-        points = self.get_ship_shape(self.current_pos, angle)
-        pygame.draw.polygon(surface, (0, 255, 255), points)
+        # 检查是否发生碰撞
+        if self.has_collided and self.collision_position is not None:
+            # 碰撞状态：绘制红色船舶并添加标记
+            angle = np.arctan2(self.velocity[1], self.velocity[0])
+            points = self.get_ship_shape(self.collision_position, angle)
+            pygame.draw.polygon(surface, (255, 0, 0), points)  # 红色表示碰撞
+            
+            # 绘制碰撞标记
+            collision_x, collision_y = self.collision_position
+            pygame.draw.circle(surface, (255, 255, 0), (int(collision_x), int(collision_y)), 15, 3)  # 黄色警告圈
+            pygame.draw.circle(surface, (255, 0, 0), (int(collision_x), int(collision_y)), 5)  # 红色中心点
+            
+            # 绘制碰撞信息
+            font = pygame.font.Font(None, 24)
+            text = font.render("COLLISION!", True, (255, 0, 0))
+            surface.blit(text, (int(collision_x) + 20, int(collision_y) - 30))
+            
+        else:
+            # 正常状态：绘制青色船舶
+            angle = np.arctan2(self.velocity[1], self.velocity[0])
+            points = self.get_ship_shape(self.current_pos, angle)
+            pygame.draw.polygon(surface, (0, 255, 255), points)
 
         # 绘制航迹 - 确保至少有2个点
         if len(self.path) > 1 and self.path_index > 0:
