@@ -2,7 +2,7 @@ import math
 import re
 import sys
 import time
-#from noise import pnoise2
+# from noise import pnoise2
 import numpy as np
 import pygame
 from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QFileDialog
@@ -28,7 +28,7 @@ from scipy.interpolate import splprep, splev
 from DynamicObstacle import DynamicObstacle
 from arithmetic.APF.apf import apf
 from arithmetic.APFRRT.APFRRT_dyn import APFRRT_dyn
-from arithmetic.APFRRT.dbvsAPFRRT import dbvsAPFRRT_dyn
+# from arithmetic.APFRRT.dbvsAPFRRT import dbvsAPFRRT_dyn
 from arithmetic.Astar.Map import Map
 from arithmetic.Astar.astar import astar
 from arithmetic.RRT.BiRRT import BiRrt
@@ -41,11 +41,13 @@ from result import Result_Demo
 from arithmetic.RRT.rrt import Rrt
 from arithmetic.APFRRT.APFRRT import APFRRT
 
-from arithmetic.PRM.prm import prm
+# from arithmetic.PRM.prm import prm
+from arithmetic.PRM.Aprm import prm
 
 # 导入局部路径规划模块
 import sys
 import os
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from local_planner.local_planner_manager import LocalPlannerManager
 from local_planner.algorithms.apf_local_planner import APFLocalPlanner
@@ -53,7 +55,180 @@ from local_planner.algorithms.dwa_local_planner import DWALocalPlanner
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
-RED=(255,0,0)
+RED = (255, 0, 0)
+
+
+def batch_run(self, algo: str = "PRM", runs: int = 50, out_dir: str = "runs",
+              seed: int = None, zh: bool = True, prefix: str = None) -> str:
+    """
+    批量循环运行算法，并保存每次运行的完整指标（含复杂度）+ 汇总CSV + 指标直方图。
+    参数：
+      - algo: "PRM" / "APF" / "APF-RRT" / "APF-RRT-dyn" / "DbvsAPF-RRT-dyn" / "RRT" / "RRT*" / "BiRRT" / "CostRRT"
+      - runs: 运行次数
+      - out_dir: 结果输出目录
+      - seed: 随机种子起点（若不为 None，则每次运行使用 seed+i）
+      - zh: 结果JSON是否用中文键名（CSV固定英文便于分析）
+      - prefix: 输出文件前缀（默认用 algo）
+    返回：输出目录路径
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    prefix = prefix or algo
+
+    # 选择对应的起算函数
+    algo_map = {
+        "PRM": self.startPRm,
+        "APF": self.startApf,
+        "APF-RRT": self.startApfRrt,
+        "APF-RRT-dyn": self.startApfRrt_dyn,
+        "DbvsAPF-RRT-dyn": self.startDbvsPRrt,
+        "RRT": self.startRtt,
+        "RRT*": self.startRRTStar,
+        "BiRRT": self.startBiRRT,
+        "CostRRT": self.startcostRrt,
+    }
+    if algo not in algo_map:
+        raise ValueError(f"不支持的算法标识：{algo}")
+
+    start_func = algo_map[algo]
+
+    # 汇总（英文键，便于CSV分析）
+    summary_rows = []
+
+    for i in range(runs):
+        if seed is not None:
+            import random
+            random.seed(seed + i)
+            np.random.seed(seed + i)
+
+        # 清理规划层
+        self.plan_surface.fill(self.back_color)
+
+        # 运行一次算法
+        try:
+            ret = start_func()
+            # 不同算法返回格式略有差异：大多数是 (track, time)
+            if isinstance(ret, tuple) and len(ret) == 2:
+                track, elapsed = ret
+            else:
+                # 回退：若算法只画到 self.result，则统一抽取
+                track = []
+                if self.result:
+                    for pt in self.result[:-1]:
+                        if hasattr(pt, 'x') and hasattr(pt, 'y'):
+                            track.append((pt.x, pt.y))
+                        elif isinstance(pt, (tuple, list)) and len(pt) >= 2:
+                            track.append((pt[0], pt[1]))
+                elapsed = None
+        except Exception as e:
+            # 失败也要写日志
+            track, elapsed = [], None
+            if hasattr(self, 'main_window'):
+                self.main_window.printf(f"[{algo}] 第{i}次运行异常：{e}", None, None)
+
+        # 生成指标（含复杂度）
+        r = Result_Demo(
+            self.start_point, self.end_point, elapsed,
+            self.obstacles, self.dynamic_obstacles, track,
+            obs_surface=self.obs_surface
+        )
+
+        # 逐次 JSON
+        per_run = r.to_metrics_dict(zh=zh)
+        # 附加运行元信息
+        per_run['run_id'] = i if not zh else i
+        per_run['seed'] = (seed + i) if seed is not None else None
+        per_run['algo'] = algo if not zh else algo
+        json_path = os.path.join(out_dir, f"{prefix}_run_{i:03d}.json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(per_run, f, ensure_ascii=not zh, indent=2)
+
+        # 汇总行为英文键
+        en = r.to_metrics_dict(zh=False)
+        en['run_id'] = i
+        en['seed'] = (seed + i) if seed is not None else None
+        en['algo'] = algo
+        summary_rows.append(en)
+
+    # 写 CSV
+    try:
+        import pandas as pd
+        df = pd.DataFrame(summary_rows)
+        csv_path = os.path.join(out_dir, f"{prefix}_summary.csv")
+        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+
+        # 生成简单的指标图（直方图）
+        import matplotlib.pyplot as plt
+        for col in ['time', 'pathlen', 'smoothness', 'straightness']:
+            if col in df.columns and df[col].notna().any():
+                plt.figure()
+                df[col].dropna().hist(bins=20)
+                plt.title(f'{algo} {col} distribution (n={runs})')
+                plt.xlabel(col);
+                plt.ylabel('count')
+                plt.tight_layout()
+                fig_path = os.path.join(out_dir, f"{prefix}_{col}_hist.png")
+                plt.savefig(fig_path, dpi=180)
+                plt.close()
+    except Exception as e:
+        if hasattr(self, 'main_window'):
+            self.main_window.printf(f"汇总/绘图失败：{e}", None, None)
+
+    if hasattr(self, 'main_window'):
+        self.main_window.printf(f"批量运行完成，输出目录：{out_dir}", None, None)
+    return out_dir
+
+
+def load_map_file(self, file_path: str) -> bool:
+    """
+    直接从文件路径加载地图（无需弹窗）。
+    支持你保存的 GeoJSON（FeatureCollection）格式：起点/终点/Polygon障碍物/动态障碍物。
+    """
+    if not os.path.isfile(file_path):
+        if hasattr(self, 'main_window'): self.main_window.printf(f"地图不存在：{file_path}", None, None)
+        return False
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            geojson_str = f.read()
+        geojson_obj = geojson.loads(geojson_str)
+
+        obstacles = []
+        dynamic_obstacles = []
+        start_point = None
+        end_point = None
+
+        for feature in geojson_obj['features']:
+            geometry = feature['geometry']
+            properties = feature.get('properties', {})
+            if geometry['type'] == 'Point' and properties.get('name') == "起始点":
+                start_point = geometry['coordinates']
+            elif geometry['type'] == 'Point' and properties.get('name') == "终点":
+                end_point = geometry['coordinates']
+            elif geometry['type'] == 'Polygon':
+                obstacles.append(tuple(geometry['coordinates'][0]))
+            elif geometry['type'] == 'Point' and properties.get('type') == "dynamic_obstacle":
+                from DynamicObstacle import DynamicObstacle
+                shape = properties.get('shape', '正方形')
+                position = tuple(geometry['coordinates'])
+                direction = tuple(properties.get('direction', (1, 0)))
+                speed = properties.get('speed', 1.0)
+                size = properties.get('size', 20.0)
+                dynamic_obstacles.append(DynamicObstacle(shape, position, direction, speed, size))
+
+        # 写入当前 widget
+        self.obstacles = obstacles
+        self.dynamic_obstacles = dynamic_obstacles
+        self.start_point = start_point
+        self.end_point = end_point
+
+        # 把障碍物画到 obs_surface 上
+        self.update_obs_surface()
+        self.update()  # 刷新
+        if hasattr(self, 'main_window'): self.main_window.printf("地图加载完成", None, None)
+        return True
+    except Exception as e:
+        if hasattr(self, 'main_window'): self.main_window.printf(f"加载失败：{e}", None, None)
+        return False
+
 
 def surface_to_cv_bgr(surface: pygame.Surface) -> cv2.typing.MatLike:
     """
@@ -92,8 +267,10 @@ def draw_line(surface, color, start_pos, end_pos, radius):
         y = int(start_pos[1] + float(i) / distance * dy)
         pygame.draw.circle(surface, color, (x, y), radius)
 
+
 class USVMotionSimulator:
     """无人船实时运动模拟器"""
+
     def __init__(self, pygame_widget):
         self.widget = pygame_widget
         self.current_pos = None
@@ -114,13 +291,13 @@ class USVMotionSimulator:
 
         # 局部路径规划管理器
         self.local_planner_manager = LocalPlannerManager()
-        
+
         # 注册可用的局部算法
         self.local_planner_manager.register_algorithm("APF算法", APFLocalPlanner)
         self.local_planner_manager.register_algorithm("DWA算法", DWALocalPlanner)
         self.local_planner_manager.register_algorithm("人工势场法", APFLocalPlanner)
         self.local_planner_manager.register_algorithm("动态窗口法", DWALocalPlanner)
-        
+
         # 设置默认算法
         self.local_algorithm = "无局部算法"
         self.local_planner_manager.set_current_algorithm("无局部算法")
@@ -136,7 +313,7 @@ class USVMotionSimulator:
         # 重置碰撞状态
         self.has_collided = False
         self.collision_position = None
-        
+
         self.current_pos = np.array(start_pos, dtype=float)
         self.target_pos = target_pos
         self.path = planned_path
@@ -160,7 +337,7 @@ class USVMotionSimulator:
         # 直接使用原始障碍物对象，无需格式转换
         static_obstacles = []  # 静态障碍物目前为空
         dynamic_obstacles = obstacles  # 动态障碍物直接使用原始对象
-        
+
         # 使用局部路径规划管理器
         return self.local_planner_manager.plan_local_path(
             np.array(current_pos),
@@ -170,21 +347,19 @@ class USVMotionSimulator:
             self.velocity
         )
 
-
-
     def check_collision_with_dynamic_obstacles(self, ship_pos):
         """检测船舶与动态障碍物的碰撞"""
         ship_radius = self.ship_radius
-        
+
         if hasattr(self.widget, 'dynamic_obstacles'):
             for obstacle in self.widget.dynamic_obstacles:
                 # 计算船舶中心到障碍物中心的距离
                 obs_x, obs_y = obstacle.position
-                distance = np.sqrt((ship_pos[0] - obs_x)**2 + (ship_pos[1] - obs_y)**2)
-                
+                distance = np.sqrt((ship_pos[0] - obs_x) ** 2 + (ship_pos[1] - obs_y) ** 2)
+
                 # 碰撞条件：距离小于船舶半径 + 障碍物半径
                 collision_distance = ship_radius + obstacle.size
-                
+
                 if distance < collision_distance:
                     # 发生碰撞
                     collision_info = {
@@ -198,7 +373,7 @@ class USVMotionSimulator:
                         'required_clearance': collision_distance
                     }
                     return True, collision_info
-        
+
         return False, None
 
     def update_position(self):
@@ -207,12 +382,12 @@ class USVMotionSimulator:
             return
 
         target_point = self.path[self.path_index]
-        
+
         # 获取动态障碍物信息用于局部算法
         obstacles = []
         if hasattr(self.widget, 'dynamic_obstacles'):
             obstacles = self.widget.dynamic_obstacles
-        
+
         # 碰撞检测
         collision_detected, collision_info = self.check_collision_with_dynamic_obstacles(self.current_pos)
         if collision_detected:
@@ -226,37 +401,37 @@ class USVMotionSimulator:
             print(f"实际距离: {collision_info['collision_distance']:.2f}")
             print(f"安全距离: {collision_info['required_clearance']:.2f}")
             print("算法终止运行！船舶已停止运动")
-            
+
             # 停止算法运行，保持界面状态
             self.is_moving = False
-            
+
             # 停止定时器
             if hasattr(self, 'motion_timer'):
                 self.motion_timer.stop()
                 print("运动定时器已停止")
-            
+
             # 在界面上标记碰撞状态
             self.has_collided = True
             self.collision_position = self.current_pos.copy()
-            
+
             # 触发重绘以显示碰撞状态
             self.widget.update()
-            
+
             # 返回，不再继续执行路径更新
             return
-        
+
         # 应用局部路径规划算法调整目标点
         adjusted_target = self.apply_local_algorithm(self.current_pos, target_point, obstacles)
-        
+
         direction = np.array(adjusted_target) - self.current_pos
         distance = np.linalg.norm(direction)
 
         # 检查是否是最后一个路径点
         is_final_target = (self.path_index == len(self.path) - 1)
-        
+
         # 最后一个路径点使用更小的阈值
         arrival_threshold = 2.0 if is_final_target else 3.0
-        
+
         if distance < arrival_threshold:  # 到达当前路径点
             self.path_index += 1
             if self.path_index >= len(self.path):
@@ -274,7 +449,7 @@ class USVMotionSimulator:
         # 平滑移动
         if distance > 0:
             direction_norm = direction / distance
-            
+
             # 动态速度调整：接近目标时减速
             if distance < 10:
                 # 接近目标时线性减速
@@ -282,18 +457,19 @@ class USVMotionSimulator:
             else:
                 # 远离目标时保持正常速度
                 speed_factor = min(1.0, distance / 20.0)
-            
+
             self.velocity = direction_norm * self.max_speed * speed_factor
-            
+
             # 确保不会越过目标点
             step_distance = np.linalg.norm(self.velocity)
             if step_distance > distance:
                 self.current_pos = np.array(adjusted_target)
             else:
                 self.current_pos += self.velocity
-            
+
             # 打印调试信息
-            print(f"船舶位置: {self.current_pos}, 原始目标点: {target_point}, 调整后目标点: {adjusted_target}, 距离: {distance:.2f}, 局部算法: {self.local_algorithm}")
+            print(
+                f"船舶位置: {self.current_pos}, 原始目标点: {target_point}, 调整后目标点: {adjusted_target}, 距离: {distance:.2f}, 局部算法: {self.local_algorithm}")
         else:
             self.velocity = np.zeros(2)
 
@@ -311,17 +487,17 @@ class USVMotionSimulator:
             angle = np.arctan2(self.velocity[1], self.velocity[0])
             points = self.get_ship_shape(self.collision_position, angle)
             pygame.draw.polygon(surface, (255, 0, 0), points)  # 红色表示碰撞
-            
+
             # 绘制碰撞标记
             collision_x, collision_y = self.collision_position
             pygame.draw.circle(surface, (255, 255, 0), (int(collision_x), int(collision_y)), 15, 3)  # 黄色警告圈
             pygame.draw.circle(surface, (255, 0, 0), (int(collision_x), int(collision_y)), 5)  # 红色中心点
-            
+
             # 绘制碰撞信息
             font = pygame.font.Font(None, 24)
             text = font.render("COLLISION!", True, (255, 0, 0))
             surface.blit(text, (int(collision_x) + 20, int(collision_y) - 30))
-            
+
         else:
             # 正常状态：绘制青色船舶
             angle = np.arctan2(self.velocity[1], self.velocity[0])
@@ -330,7 +506,7 @@ class USVMotionSimulator:
 
         # 绘制航迹 - 确保至少有2个点
         if len(self.path) > 1 and self.path_index > 0:
-            path_to_draw = self.path[:self.path_index+1]
+            path_to_draw = self.path[:self.path_index + 1]
             if len(path_to_draw) >= 2:
                 pygame.draw.lines(surface, (0, 100, 255), False, path_to_draw, 2)
 
@@ -343,6 +519,8 @@ class USVMotionSimulator:
             (x + size * np.cos(angle + 2.5), y + size * np.sin(angle + 2.5)),
             (x + size * np.cos(angle - 2.5), y + size * np.sin(angle - 2.5))
         ]
+
+
 class PygameWidget(QWidget):
     BACK_COLOR = WHITE
     OBS_COLOR = BLACK
@@ -407,7 +585,7 @@ class PygameWidget(QWidget):
         # 初始化多边形轮廓存储的障碍物列表，每个障碍物是一个包含其所有顶点的列表
         self.obstacles = []
 
-        #初始化动态障碍物列表
+        # 初始化动态障碍物列表
         self.dynamic_obstacles = []
 
         # 路径规划算法
@@ -528,6 +706,7 @@ class PygameWidget(QWidget):
             self.end_point,
             path_points
         )
+
     # A*算法
     def startAstar(self):
         self.result = None
@@ -560,6 +739,7 @@ class PygameWidget(QWidget):
             track.append((x, y))
         # self.save_result(time1,track)
         return track, time1
+
     def startRRTStar(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
@@ -571,6 +751,7 @@ class PygameWidget(QWidget):
             y = point.y
             track.append((x, y))
         return track, time
+
     def startBiRRT(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
@@ -584,9 +765,10 @@ class PygameWidget(QWidget):
         for point in self.result:
             x = point.x
             y = point.y
-            #print(x,y);
+            # print(x,y);
             track.append((x, y))
         return track, time
+
     def startApf(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
@@ -605,6 +787,7 @@ class PygameWidget(QWidget):
         for point in self.result[:-1]:
             track.append((point.x, point.y))
         return track, time
+
     def startApfRrt_dyn(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
@@ -613,6 +796,7 @@ class PygameWidget(QWidget):
         for point in self.result[:-1]:
             track.append((point.x, point.y))
         return track, time
+
     def startDbvsPRrt(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
@@ -621,6 +805,7 @@ class PygameWidget(QWidget):
         for point in self.result[:-1]:
             track.append((point.x, point.y))
         return track, time
+
     def startPRm(self):
         self.result = None
         self.result, time = prm(self).plan(self.plan_surface)
@@ -628,6 +813,7 @@ class PygameWidget(QWidget):
         for point in self.result[:-1]:
             track.append((point.x, point.y))
         return track, time
+
     def startcostRrt(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
@@ -636,6 +822,7 @@ class PygameWidget(QWidget):
         for point in self.result[:-1]:
             track.append((point.x, point.y))
         return track, time
+
     def save_result(self, time1, track, file_path):
         """
         保存结果文件，包括地图
@@ -679,7 +866,7 @@ class PygameWidget(QWidget):
             features.append(Feature(geometry=end_point, properties={"name": "终点"}))
         if self.dynamic_obstacles is not None:
             for dynamic_obstacle in self.dynamic_obstacles:
-                shape=dynamic_obstacle.shape
+                shape = dynamic_obstacle.shape
                 position = dynamic_obstacle.position
                 direction = dynamic_obstacle.direction
                 speed = dynamic_obstacle.speed
@@ -690,7 +877,7 @@ class PygameWidget(QWidget):
                     properties={
                         "type": "dynamic_obstacle",
                         "name": "动态障碍物",
-                        "shape":shape,
+                        "shape": shape,
                         "direction": direction,
                         "speed": speed,
                         "size": size
@@ -699,13 +886,15 @@ class PygameWidget(QWidget):
                 features.append(dynamic_feature)
         feature_collection = FeatureCollection(features)
         # 先封装经过计算再存入结果文件
-        r = Result_Demo(self.start_point, self.end_point, time1, self.obstacles, self.dynamic_obstacles,track)
-        js2 = json.loads(str(feature_collection))
-        js = dict(time=time1, track=track, smoothness=r.smoothness, pathlen=r.pathlen)  # 加入r中计算的数据到结果类中
-        js2.update(js)
-        print(js2)
+        r = Result_Demo(self.start_point, self.end_point, time1, self.obstacles, self.dynamic_obstacles, track)
+        js = dict(time=time1, track=track, smoothness=r.smoothness, pathlen=r.pathlen)
+        r = Result_Demo(self.start_point, self.end_point, time1, self.obstacles, self.dynamic_obstacles, track,
+                          obs_surface=self.obs_surface)
+        js = r.to_metrics_dict(zh=False)
+
+        print(js)
         # 将FeatureCollection保存为GeoJSON格式的字符串
-        geojson_str = json.dumps(js2, indent=4)
+        geojson_str = json.dumps(js, indent=4)
         with open(file_path, 'w') as file:
             file.write(geojson_str)
         self.main_window.printf("地图和结果数据已成功保存！", None, None)
@@ -750,7 +939,7 @@ class PygameWidget(QWidget):
             # 处理动态障碍物
         if self.dynamic_obstacles is not None:
             for dynamic_obstacle in self.dynamic_obstacles:
-                shape=dynamic_obstacle.shape
+                shape = dynamic_obstacle.shape
                 position = dynamic_obstacle.position
                 direction = dynamic_obstacle.direction
                 speed = dynamic_obstacle.speed
@@ -761,7 +950,7 @@ class PygameWidget(QWidget):
                     properties={
                         "type": "dynamic_obstacle",
                         "name": "动态障碍物",
-                        "shape":shape,
+                        "shape": shape,
                         "direction": direction,
                         "speed": speed,
                         "size": size
@@ -828,7 +1017,7 @@ class PygameWidget(QWidget):
         绘制动态障碍物到动态障碍物表面。
         """
         # 清空动态障碍物表面
-        #self.dynamic_surface.fill((0, 0, 0, 0))  # 透明背景
+        # self.dynamic_surface.fill((0, 0, 0, 0))  # 透明背景
         self.dynamic_surface.fill(self.back_color)
 
         # 绘制每个动态障碍物
@@ -851,7 +1040,7 @@ class PygameWidget(QWidget):
             else:
                 raise ValueError(f"未知动态障碍物形状: {obstacle.shape}")
 
-    #创建动态障碍物定义，并加入列表中
+    # 创建动态障碍物定义，并加入列表中
     def create_dynamic_obstacle(self, x, y, shape, direction, speed):
         # 创建障碍物图形（可以使用 QLabel 模拟）
         # 定义运动方向（dx, dy）
@@ -860,13 +1049,11 @@ class PygameWidget(QWidget):
         self.dynamic_obstacles.append(DynamicObstacle(
             shape,
             (x, y),
-            (dx,dy),  # 水平方向
+            (dx, dy),  # 水平方向
             speed,
             20
         ))
-        #self.draw_dynamic_obstacles()
-
-
+        # self.draw_dynamic_obstacles()
 
     # def move_obstacle(self, grid_widget, obstacle, dx, dy, speed):
     #     # 获取障碍物当前位置
@@ -951,8 +1138,6 @@ class PygameWidget(QWidget):
         if self.end_point:
             pygame.draw.circle(self.obs_surface, (255, 0, 0), self.end_point, self.obs_radius)
 
-
-
     # 鼠标点击事件处理
     def mousePressEvent(self, event):
 
@@ -1009,14 +1194,13 @@ class PygameWidget(QWidget):
         self.update_dynamic_obstacles()
         # 绘制动态障碍物
         self.draw_dynamic_obstacles()
-        #将多个表面叠加
+        # 将多个表面叠加
         self.surface.blit(self.obs_surface, (0, 0))
         self.surface.blit(self.dynamic_surface, (0, 0))
         self.surface.blit(self.point_surface, (0, 0))
         self.surface.blit(self.plan_surface, (0, 0))
         if self.grid:
             self.surface.blit(self.grid_surface, (0, 0))
-
 
         # 绘制船舶
         if hasattr(self, 'motion_simulator') and self.motion_simulator:
@@ -1207,7 +1391,7 @@ class PygameWidget(QWidget):
         self.start_point = None  # 清除起点
         self.end_point = None  # 清除终点
         self.obstacles = []  # 清空障碍物列表
-        self.dynamic_obstacles=[]
+        self.dynamic_obstacles = []
         self.dynamic_surface.fill(self.back_color)
         self.obs_surface.fill(self.back_color)
         self.plan_surface.fill(self.back_color)
@@ -1490,6 +1674,7 @@ class PygameWidget(QWidget):
                 x_new, y_new = splev(u_new, tck, der=0)
 
                 return list(zip(x_new, y_new))
+
             # 根据用户输入的数量输出障碍物
             for _ in range(int(quantity)):
                 retries = 0
@@ -1546,7 +1731,7 @@ class PygameWidget(QWidget):
                             pygame.draw.rect(self.obs_surface, self.obs_color, (x, y, width, height))
                             break
                     elif shape_type == 5:  # 不规则形状
-                        max_radius = random.randrange(15,50)
+                        max_radius = random.randrange(15, 50)
                         center = (max_radius, max_radius)
                         points = generate_smooth_blob(center, max_radius)
                         if len(points) >= 3:  # 确保有足够的点数

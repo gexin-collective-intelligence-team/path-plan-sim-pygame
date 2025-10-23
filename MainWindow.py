@@ -15,7 +15,7 @@ from result import load_demo, Category_Demo, Category_Compare, load_look
 class Ui_MainWindow(object):
     windows = []  # 存储所有创建的窗口实例
 
-#动态障碍物窗口，用户选择生成位置，移动方向，
+    # 动态障碍物窗口，用户选择生成位置，移动方向，
     def DynamicObstaclesUI(self, MainWindow, grid_widget):
         self.loginWindow_new = None
         MainWindow.setObjectName("MainWindow")
@@ -31,7 +31,6 @@ class Ui_MainWindow(object):
 
         shape_group.addButton(radio_circle)
         shape_group.addButton(radio_square)
-
 
         # 障碍物运动方向
         label_direction = QLabel("运动方向:", MainWindow)
@@ -99,16 +98,15 @@ class Ui_MainWindow(object):
             direction = direction_button.text()
 
             # 创建动态障碍物
-            grid_widget.create_dynamic_obstacle( x, y, shape, direction, speed)
+            grid_widget.create_dynamic_obstacle(x, y, shape, direction, speed)
 
         grid_widget.mousePressEvent = on_grid_click
-
 
     # 参数障碍物窗口 根据用户选择生成相同大小障碍物
     def modify_obstacles(self, MainWindow, grid_widget):
         self.loginWindow_new = None
         MainWindow.setObjectName("MainWindow")
-        MainWindow.setFixedSize(400, 300) # 窗口大小锁定
+        MainWindow.setFixedSize(400, 300)  # 窗口大小锁定
         # 创建障碍物数量标签
         self.label_sum = QLabel("障碍物数量:", MainWindow)
         self.label_sum.setGeometry(60, 50, 80, 30)  # 设置标签位置和大小
@@ -191,7 +189,7 @@ class Ui_MainWindow(object):
                 return
             obstacle_size = slider.value()
             obstacle_types = []
-            if not checkbox1.isChecked() and not checkbox2.isChecked() and not checkbox3.isChecked() and not checkbox4.isChecked() and not checkbox5.isChecked()and not checkbox6.isChecked():
+            if not checkbox1.isChecked() and not checkbox2.isChecked() and not checkbox3.isChecked() and not checkbox4.isChecked() and not checkbox5.isChecked() and not checkbox6.isChecked():
                 label_notice.setText("请选择至少一种障碍物类型！")
                 return
             if checkbox1.isChecked():
@@ -255,6 +253,7 @@ class Ui_MainWindow(object):
         # 单次路径结果比较分析
         button_single = QPushButton("单次路径结果比较分析", MainWindow)
         button_single.setGeometry(10, 10, 50, 30)
+
         def on_single_click():
             # 创建文件对话框
             dialog = QFileDialog()
@@ -267,11 +266,13 @@ class Ui_MainWindow(object):
             files, _ = dialog.getOpenFileNames()
             for index, f in enumerate(files):  # 循环选中的所有文件
                 self.open_result_single(index, f)
+
         button_single.clicked.connect(on_single_click)
 
         # 多路径比较分析
         button_category = QPushButton("多次路径比较分析", MainWindow)
         button_category.setGeometry(10, 40, 50, 30)
+
         def on_category_click():
             dialog = QFileDialog()
             dialog.setWindowTitle("选择要进行多次结果分析的文件夹")
@@ -280,6 +281,7 @@ class Ui_MainWindow(object):
                 category = Category_Demo()  # 创建多结果类
                 category.read_file(dialog.selectedFiles()[0])  # 获取选择的文件夹的路径
                 self.open_result_category(category)
+
         button_category.clicked.connect(on_category_click)
         # 创建开始规划按钮
         self.button_start = QPushButton("开始规划", MainWindow)
@@ -288,6 +290,7 @@ class Ui_MainWindow(object):
         # 不同算法性能对比(多个多次路径比较分析)
         button_category_compare = QPushButton("不同算法性能比较", MainWindow)
         button_category_compare.setGeometry(10, 70, 50, 30)
+
         def on_category_compare_click():
             dialog = QFileDialog()
             dialog.setWindowTitle("选择要进行性能对比的文件")
@@ -296,8 +299,8 @@ class Ui_MainWindow(object):
                 compare = Category_Compare()
                 compare.read_category(files)
                 self.open_result_category_compare(compare)
-        button_category_compare.clicked.connect(on_category_compare_click)
 
+        button_category_compare.clicked.connect(on_category_compare_click)
 
     # 随机障碍物提示输入障碍物数量窗口
     def random_ob(self, MainWindow, grid_widget):
@@ -324,6 +327,7 @@ class Ui_MainWindow(object):
                 return
             grid_widget.random_graph_new(int(obstacle_quantity))
             label_notice.setText("障碍物生成成功！")
+
         # 连接按钮的点击信号
         self.button_generate_obstacle.clicked.connect(on_button_click)
 
@@ -354,11 +358,11 @@ class Ui_MainWindow(object):
         radio_button_RRTapf = QRadioButton("RRT-APF", MainWindow)
         radio_button_RRTapf.setGeometry(270, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_RRTapf)  # 将单选按钮添加到单选按钮组
-        #PRM
+        # PRM
         radio_button_PRM = QRadioButton("PRM", MainWindow)
         radio_button_PRM.setGeometry(370, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_PRM)
-        #RRTstar
+        # RRTstar
         radio_button_RRTStar = QRadioButton("RRTStar", MainWindow)
         radio_button_RRTStar.setGeometry(430, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_RRTStar)
@@ -366,7 +370,7 @@ class Ui_MainWindow(object):
         radio_button_BiRRT = QRadioButton("BiRRT", MainWindow)
         radio_button_BiRRT.setGeometry(500, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_BiRRT)
-        #dynapfrrt
+        # dynapfrrt
         radio_button_RRTapf_dyn = QRadioButton("RRTAPFdyn", MainWindow)
         radio_button_RRTapf_dyn.setGeometry(560, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_RRTapf_dyn)
@@ -403,7 +407,7 @@ class Ui_MainWindow(object):
         radio_button_run_false.setChecked(True)  # 默认是只运行一次
         radio_button_run.addButton(radio_button_run_false)
         # 设置结果文件名称的部分
-        label_path = QLabel("",MainWindow)
+        label_path = QLabel("", MainWindow)
         label_path.setGeometry(30, 120, 200, 30)
         line_edit_result = QLineEdit("", MainWindow)
         line_edit_result.setPlaceholderText("请输入文件名")
@@ -413,9 +417,10 @@ class Ui_MainWindow(object):
         spin_box = QSpinBox(MainWindow)  # 数字选择框
         spin_box.setGeometry(30, 180, 50, 30)
         spin_box.setMinimum(0)  # 设置最小值
-        spin_box.setMaximum(100)  # 设置最大值
+        spin_box.setMaximum(10000)  # 设置最大值
         spin_box.setValue(1)  # 设置默认值
         spin_box.hide()  # 默认是运行一次,所以先隐藏
+
         def on_result_click(button):
             if button == radio_button_result_true:
                 select_folder = QFileDialog.getExistingDirectory(MainWindow, "选择文件夹", "")
@@ -423,12 +428,15 @@ class Ui_MainWindow(object):
                 line_edit_result.show()
             else:
                 line_edit_result.hide()
+
         radio_button_result.buttonClicked.connect(on_result_click)
+
         def on_run_click(button):
             if button == radio_button_run_true:
                 spin_box.show()
             else:
                 spin_box.hide()
+
         radio_button_run.buttonClicked.connect(on_run_click)
         # 创建生成障碍物按钮
         self.button_generate_obstacle = QPushButton("开始规划", MainWindow)
@@ -438,7 +446,7 @@ class Ui_MainWindow(object):
         label_notice.setGeometry(80, 210, 150, 30)  # 设置标签位置和大小
 
         def on_button_click():
-            if not radio_button_astar.isChecked() and not radio_button_rrt.isChecked() and not radio_button_apf.isChecked() and not radio_button_RRTapf and not radio_button_PRM and not radio_button_BiRRT and not radio_button_RRTStar and not radio_button_RRTapf_dyn and not radio_button_dbvspRRT and not radio_button_costRRT :
+            if not radio_button_astar.isChecked() and not radio_button_rrt.isChecked() and not radio_button_apf.isChecked() and not radio_button_RRTapf and not radio_button_PRM and not radio_button_BiRRT and not radio_button_RRTStar and not radio_button_RRTapf_dyn and not radio_button_dbvspRRT and not radio_button_costRRT:
                 label_notice.setText("请选择规划路径所用算法！")
                 return
             # 检测路径是否合法
@@ -478,7 +486,7 @@ class Ui_MainWindow(object):
                 elif radio_button_RRTapf_dyn.isChecked():
                     obstacle_overlap = "RRT-APF-Dyn"
                     track, time = grid_widget.startApfRrt_dyn()
-                elif radio_button_costRRT .isChecked():
+                elif radio_button_costRRT.isChecked():
                     obstacle_overlap = "costRRT"
                     track, time = grid_widget.startcostRrt()
                 elif radio_button_dbvspRRT.isChecked():
@@ -487,7 +495,7 @@ class Ui_MainWindow(object):
                 label_notice.setText("正在规划路径！")
                 # 保存结果部分
                 if radio_button_result_true.isChecked():
-                    filepath = label_path.text()+"/"+line_edit_result.text()+str(i)+".txt"
+                    filepath = label_path.text() + "/" + line_edit_result.text() + str(i) + ".txt"
                     grid_widget.save_result(time1=time, track=track, file_path=filepath)
 
         # 连接按钮的点击信号
@@ -520,8 +528,10 @@ class Ui_MainWindow(object):
                 return
             grid_widget.modifyMap(int(obstacle_quantity))
             label_notice.setText("分辨率修改成功！")
+
         def on_button_default():
             print("默认地图")
+
         # 连接按钮的点击信号
         self.button_modify.clicked.connect(on_button_click)
 
@@ -583,6 +593,7 @@ class Ui_MainWindow(object):
             else:
                 print("坐标格式不正确")
             label_notice.setText("输入起始点生成成功！")
+
         # 连接按钮的点击信号
         self.button_modify.clicked.connect(on_button_click)
 
@@ -612,8 +623,9 @@ class Ui_MainWindow(object):
         # 按钮点击事件处理函数
         def on_button_click():
             selected_index = self.combo_box.currentIndex()
-            grid_widget.paint_random_one(selected_index+1)
+            grid_widget.paint_random_one(selected_index + 1)
             label_notice.setText("障碍物生成成功！")
+
         # 连接按钮的点击信号到处理函数
         self.button_modify.clicked.connect(on_button_click)
 
@@ -641,6 +653,7 @@ class Ui_MainWindow(object):
             new_window.setWindowTitle('曲率展示')
             new_window.show()
             self.windows.append(new_window)  # 将新创建的窗口实例添加到列表中
+
         button_smoothness.clicked.connect(on_button_click)
 
         button_save = QPushButton("保存图片")
@@ -663,6 +676,7 @@ class Ui_MainWindow(object):
         main_widget.setLayout(layout)
         MainWindow.setCentralWidget(main_widget)
         MainWindow.show()
+
     def map_look(self, MainWindow, grid_widget, index, f):
         """
         结果分析窗口设计
@@ -675,7 +689,7 @@ class Ui_MainWindow(object):
         MainWindow.setGeometry(100 + 10 * index, 100 + 10 * index, 500, 500)
         r = load_look(f)
         canvas = r.draw_map()
-        #button_smoothness = QPushButton("展示曲率")
+        # button_smoothness = QPushButton("展示曲率")
         button_save = QPushButton("保存图片")
 
         def on_save_button_click():
@@ -683,6 +697,7 @@ class Ui_MainWindow(object):
                                                        "PNG Files (*.png);;JPEG Files (*.jpg)")
             if file_path:
                 canvas.grab().save(file_path)
+
         button_save.clicked.connect(on_save_button_click)
         layout = QVBoxLayout()
         layout.addWidget(canvas)
@@ -691,6 +706,7 @@ class Ui_MainWindow(object):
         main_widget.setLayout(layout)
         MainWindow.setCentralWidget(main_widget)
         MainWindow.show()
+
     def result_category(self, MainWindow, grid_widget, category):
         """
         多次结果分析窗口设计
@@ -701,12 +717,16 @@ class Ui_MainWindow(object):
         """
         MainWindow.setGeometry(100, 100, 500, 500)
         button_path_compare = QPushButton("路径叠加")
+
         def on_button_path_compare_click():
             self.open_result_track_compare(category)
+
         button_path_compare.clicked.connect(on_button_path_compare_click)
         button_average = QPushButton("求平均值")
+
         def on_button_average():
             self.open_result_average(category)
+
         button_average.clicked.connect(on_button_average)
         layout = QVBoxLayout()
         layout.addWidget(button_path_compare)
@@ -723,12 +743,13 @@ class Ui_MainWindow(object):
         :return:
         """
         MainWindow.setGeometry(100, 100, 500, 500)
-        label_smooth = QLabel("平均平滑度是："+str(category.ave_smooth))
-        label_time = QLabel("平均时间是："+str(category.ave_time))
-        label_path_length = QLabel("平均路径长度是："+str(category.ave_path_length))
+        label_smooth = QLabel("平均平滑度是：" + str(category.ave_smooth))
+        label_time = QLabel("平均时间是：" + str(category.ave_time))
+        label_path_length = QLabel("平均路径长度是：" + str(category.ave_path_length))
         textbox_name = QLineEdit("")
         textbox_name.setPlaceholderText("请输入文件名")
         button_save = QPushButton("保存结果")
+
         def on_button_save_click():
             dialog = QFileDialog()
             dialog.setAcceptMode(QFileDialog.AcceptSave)
@@ -741,6 +762,7 @@ class Ui_MainWindow(object):
             # 打开文件对话框，并返回保存的文件路径
             file_path, _ = dialog.getSaveFileName(MainWindow, '保存category', '', 'category文件 (*.txt)')
             category.save_file(file_path, textbox_name.text())
+
         button_save.clicked.connect(on_button_save_click)
         layout = QVBoxLayout()
         layout.addWidget(label_time)
@@ -755,6 +777,7 @@ class Ui_MainWindow(object):
     def result_category_compare(self, MainWindow, grid_widget, compare):
         MainWindow.setGeometry(100, 100, 500, 500)
         button_image = QPushButton("对比结果生成图片")
+
         def on_button_image_click():
             dialog = QFileDialog()
             dialog.setAcceptMode(QFileDialog.AcceptSave)
@@ -762,8 +785,10 @@ class Ui_MainWindow(object):
             dialog.setDefaultSuffix('png')
             file_path, _ = dialog.getSaveFileName(MainWindow, '保存表格', '', '(*.png)')
             compare.save_image(file_path)
+
         button_image.clicked.connect(on_button_image_click)
         button_csv = QPushButton("对比结果生成csv")
+
         def on_button_csv_clink():
             dialog = QFileDialog()
             dialog.setAcceptMode(QFileDialog.AcceptSave)
@@ -771,6 +796,7 @@ class Ui_MainWindow(object):
             dialog.setDefaultSuffix('csv')
             file_path, _ = dialog.getSaveFileName(MainWindow, '保存表格', '', '(*.csv)')
             compare.save_csv(file_path)
+
         button_csv.clicked.connect(on_button_csv_clink)
         layout = QVBoxLayout()
         layout.addWidget(button_image)
@@ -867,18 +893,18 @@ class Ui_MainWindow(object):
         self.pushButton_7 = QtWidgets.QPushButton(self.centralwidget)
         self.pushButton_7.setGeometry(QtCore.QRect(640, 455, 80, 23))
         self.pushButton_7.setObjectName("pushButton_7")
-        self.pushButton_7.clicked.connect(self.open_start_path) # 方法
+        self.pushButton_7.clicked.connect(self.open_start_path)  # 方法
         # 单路径规划
         self.pushButton_plan = QtWidgets.QPushButton(self.centralwidget)
         self.pushButton_plan.setGeometry(QtCore.QRect(640, 455, 80, 23))
         self.pushButton_plan.setObjectName("pushButton_plan")
-        self.pushButton_plan.clicked.connect(self.select_method) # 方法
+        self.pushButton_plan.clicked.connect(self.select_method)  # 方法
         # 地图调整
         self.pushButton_modify_map = QtWidgets.QPushButton(self.centralwidget)
         self.pushButton_modify_map.setGeometry(QtCore.QRect(640, 455, 80, 23))
         self.pushButton_modify_map.setObjectName("pushButton_modify_map")
         self.pushButton_modify_map.clicked.connect(self.modify_map)  # 方法
-        #预览地图
+        # 预览地图
         self.pushButton_look_map = QtWidgets.QPushButton(self.centralwidget)
         self.pushButton_look_map.setGeometry(QtCore.QRect(640, 455, 80, 23))
         self.pushButton_look_map.setObjectName("pushButton_look_map")
@@ -928,21 +954,21 @@ class Ui_MainWindow(object):
         self.pushButton_dynamic_ob.setObjectName("pushButton_dynamic_ob")
         self.pushButton_dynamic_ob.setText("动态障碍物")  # 设置按钮的文字
         self.pushButton_dynamic_ob.clicked.connect(self.handle_dynamic_ob)  # 绑定点击事件
-        #self.pushButton_dynamic_ob.setStyleSheet("background-color: yellow;")  # 设置背景色以便观察
-        #self.pushButton_dynamic_ob.setVisible(True)  # 确保按钮可见
-         # 新增：实时模拟按钮
+        # self.pushButton_dynamic_ob.setStyleSheet("background-color: yellow;")  # 设置背景色以便观察
+        # self.pushButton_dynamic_ob.setVisible(True)  # 确保按钮可见
+        # 新增：实时模拟按钮
         self.btn_realtime_sim = QtWidgets.QPushButton(self.centralwidget)
         self.btn_realtime_sim.setGeometry(QtCore.QRect(730, 454, 80, 25))  # 设置按钮的位置和大小
         self.btn_realtime_sim.setObjectName("btn_realtime_sim")
         self.btn_realtime_sim.setText("实时航行")  # 设置按钮的文字
         self.btn_realtime_sim.clicked.connect(self.start_realtime_simulation)  # 绑定点击事件
-        
+
         # 新增：局部路径规划算法选择框
         self.label_local_algorithm = QtWidgets.QLabel(self.centralwidget)
         self.label_local_algorithm.setGeometry(QtCore.QRect(820, 454, 100, 25))
         self.label_local_algorithm.setObjectName("label_local_algorithm")
         self.label_local_algorithm.setText("局部算法:")
-        
+
         self.combo_local_algorithm = QtWidgets.QComboBox(self.centralwidget)
         self.combo_local_algorithm.setGeometry(QtCore.QRect(920, 454, 120, 25))
         self.combo_local_algorithm.setObjectName("combo_local_algorithm")
@@ -1068,7 +1094,6 @@ class Ui_MainWindow(object):
         self.retranslateUi(MainWindow)
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
 
-
     def handle_dynamic_ob(self):
         # 创建一个新的窗口
         dynamic_ob_window = QtWidgets.QMainWindow()
@@ -1077,7 +1102,7 @@ class Ui_MainWindow(object):
         dynamic_ob_window.setWindowTitle('动态障碍物')
         # 初始化动态障碍物界面
 
-        #ui.setupUi(dynamic_ob_window, self.grid_widget)
+        # ui.setupUi(dynamic_ob_window, self.grid_widget)
         # 显示新窗口
         dynamic_ob_window.show()
         # 将窗口实例保存到窗口列表中，避免被垃圾回收
@@ -1090,6 +1115,7 @@ class Ui_MainWindow(object):
         new_window.setWindowTitle('图形障碍物')
         new_window.show()
         self.windows.append(new_window)  # 将新创建的窗口实例添加到列表中
+
     # 随机障碍物窗口
     def open_randomOb(self):
         new_window = QtWidgets.QMainWindow()
@@ -1105,6 +1131,7 @@ class Ui_MainWindow(object):
         new_window.setWindowTitle('输入起始点')
         new_window.show()
         self.windows.append(new_window)  # 将新创建的窗口实例添加到列表中
+
     # 随机障碍物窗口
     def modify_map(self):
         new_window = QtWidgets.QMainWindow()
@@ -1130,6 +1157,7 @@ class Ui_MainWindow(object):
             new_window.setWindowTitle('地图预览')
             new_window.show()
             self.windows.append(new_window)  # 将新创建的窗口实例添加到列表中
+
     # 路径规划选择算法窗口
     def select_method(self):
         new_window = QtWidgets.QMainWindow()
@@ -1137,6 +1165,7 @@ class Ui_MainWindow(object):
         new_window.setWindowTitle('仿真算法')
         new_window.show()
         self.windows.append(new_window)  # 将新创建的窗口实例添加到列表中
+
     # 打开参数障碍物窗口
     def open_modifyOb(self):
         new_window = QtWidgets.QMainWindow()
@@ -1146,6 +1175,7 @@ class Ui_MainWindow(object):
         self.windows.append(new_window)  # 将新创建的窗口实例添加到列表中
 
         # 打开规划算法窗口
+
     def open_start_path(self):
         new_window = QtWidgets.QMainWindow()
         ui.start_path(new_window, self.grid_widget)
@@ -1201,6 +1231,7 @@ class Ui_MainWindow(object):
         new_window.setWindowTitle('多路径分析')
         new_window.show()
         self.windows.append(new_window)  # 将新创建的窗口实例添加到列表中
+
     def open_result_category_compare(self, compare):
         """
         打开多算法比较信息的窗口
@@ -1314,19 +1345,21 @@ class Ui_MainWindow(object):
         self.action_analyse.setText(_translate("MainWindow", "分析规划"))
         self.action_get.setText(_translate("MainWindow", "获取图形"))
         self.action_rasterization.setText(_translate("MainWindow", "栅格化"))
+
     # 路径规划
     def start_realtime_simulation(self):
         """启动实时模拟"""
         self.grid_widget.plan_surface.fill((255, 255, 255))
-        
+
         # 获取当前选择的局部算法
         local_algorithm = self.combo_local_algorithm.currentText()
-        
+
         # 设置局部算法到运动模拟器
         if hasattr(self.grid_widget, 'motion_simulator') and self.grid_widget.motion_simulator:
             self.grid_widget.motion_simulator.set_local_algorithm(local_algorithm)
-        
+
         self.grid_widget.start_realtime_simulation()
+
     def startPath(self):
         self.grid_widget.plan_surface.fill((255, 255, 255))
         if not self.grid_widget.obstacles or not self.grid_widget.start_point or not self.grid_widget.end_point:
@@ -1380,8 +1413,6 @@ class Ui_MainWindow(object):
     def openArithmeticList(self):
         self.algorithm_list = AlgorithmList()
         self.algorithm_list.show()
-
-
 
 
 if __name__ == '__main__':
