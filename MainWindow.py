@@ -99,7 +99,7 @@ class Ui_MainWindow(object):
             direction = direction_button.text()
 
             # 创建动态障碍物
-            grid_widget.create_dynamic_obstacle( x, y, shape, direction, speed)
+            grid_widget.create_dynamic_obstacle(x, y, shape, direction, speed)
 
         grid_widget.mousePressEvent = on_grid_click
 
@@ -255,6 +255,7 @@ class Ui_MainWindow(object):
         # 单次路径结果比较分析
         button_single = QPushButton("单次路径结果比较分析", MainWindow)
         button_single.setGeometry(10, 10, 50, 30)
+
         def on_single_click():
             # 创建文件对话框
             dialog = QFileDialog()
@@ -267,11 +268,13 @@ class Ui_MainWindow(object):
             files, _ = dialog.getOpenFileNames()
             for index, f in enumerate(files):  # 循环选中的所有文件
                 self.open_result_single(index, f)
+
         button_single.clicked.connect(on_single_click)
 
         # 多路径比较分析
         button_category = QPushButton("多次路径比较分析", MainWindow)
         button_category.setGeometry(10, 40, 50, 30)
+
         def on_category_click():
             dialog = QFileDialog()
             dialog.setWindowTitle("选择要进行多次结果分析的文件夹")
@@ -280,6 +283,7 @@ class Ui_MainWindow(object):
                 category = Category_Demo()  # 创建多结果类
                 category.read_file(dialog.selectedFiles()[0])  # 获取选择的文件夹的路径
                 self.open_result_category(category)
+
         button_category.clicked.connect(on_category_click)
         # 创建开始规划按钮
         self.button_start = QPushButton("开始规划", MainWindow)
@@ -288,6 +292,7 @@ class Ui_MainWindow(object):
         # 不同算法性能对比(多个多次路径比较分析)
         button_category_compare = QPushButton("不同算法性能比较", MainWindow)
         button_category_compare.setGeometry(10, 70, 50, 30)
+
         def on_category_compare_click():
             dialog = QFileDialog()
             dialog.setWindowTitle("选择要进行性能对比的文件")
@@ -296,8 +301,8 @@ class Ui_MainWindow(object):
                 compare = Category_Compare()
                 compare.read_category(files)
                 self.open_result_category_compare(compare)
-        button_category_compare.clicked.connect(on_category_compare_click)
 
+        button_category_compare.clicked.connect(on_category_compare_click)
 
     # 随机障碍物提示输入障碍物数量窗口
     def random_ob(self, MainWindow, grid_widget):
@@ -354,11 +359,11 @@ class Ui_MainWindow(object):
         radio_button_RRTapf = QRadioButton("RRT-APF", MainWindow)
         radio_button_RRTapf.setGeometry(270, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_RRTapf)  # 将单选按钮添加到单选按钮组
-        #PRM
+        # PRM
         radio_button_PRM = QRadioButton("PRM", MainWindow)
         radio_button_PRM.setGeometry(370, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_PRM)
-        #RRTstar
+        # RRTstar
         radio_button_RRTStar = QRadioButton("RRTStar", MainWindow)
         radio_button_RRTStar.setGeometry(430, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_RRTStar)
@@ -366,7 +371,7 @@ class Ui_MainWindow(object):
         radio_button_BiRRT = QRadioButton("BiRRT", MainWindow)
         radio_button_BiRRT.setGeometry(500, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_BiRRT)
-        #dynapfrrt
+        # dynapfrrt
         radio_button_RRTapf_dyn = QRadioButton("RRTAPFdyn", MainWindow)
         radio_button_RRTapf_dyn.setGeometry(560, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_RRTapf_dyn)
@@ -1202,6 +1207,7 @@ class Ui_MainWindow(object):
         new_window.setWindowTitle('多路径分析')
         new_window.show()
         self.windows.append(new_window)  # 将新创建的窗口实例添加到列表中
+
     def open_result_category_compare(self, compare):
         """
         打开多算法比较信息的窗口
