@@ -77,6 +77,8 @@ def load_demo(file_name):
     if 'complexity' in geojson_obj:
         r.set_complexity_from_dict(geojson_obj['complexity'])
     return r
+
+
 def load_look(file_name):
     """
     加载result_demo(路径规划问题结果类)
