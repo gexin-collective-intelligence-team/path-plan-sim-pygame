@@ -52,7 +52,8 @@ class LocalPlannerManager:
                        target_pos: np.ndarray,
                        static_obstacles: List,
                        dynamic_obstacles: List,
-                       velocity: Optional[np.ndarray] = None) -> np.ndarray:
+                       velocity: Optional[np.ndarray] = None,
+                       global_path: Optional[List[np.ndarray]] = None) -> np.ndarray:
         """
         执行局部路径规划
         
@@ -62,6 +63,7 @@ class LocalPlannerManager:
             static_obstacles: 静态障碍物列表（原始对象）
             dynamic_obstacles: 动态障碍物列表（原始对象，只包含新增的）
             velocity: 当前速度向量 [vx, vy]
+            global_path: 全局路径点列表，用于前视目标点选择（可选）
             
         Returns:
             调整后的目标位置 [x, y]
@@ -73,7 +75,16 @@ class LocalPlannerManager:
         if algorithm is None:
             return target_pos
             
-        return algorithm.plan(current_pos, target_pos, static_obstacles, dynamic_obstacles, velocity)
+        # 检查当前算法是否支持global_path参数
+        import inspect
+        algorithm_plan_params = inspect.signature(algorithm.plan).parameters
+        
+        # 根据算法是否支持global_path参数，选择不同的调用方式
+        if 'global_path' in algorithm_plan_params:
+            return algorithm.plan(current_pos, target_pos, static_obstacles, dynamic_obstacles, velocity, global_path)
+        else:
+            # 对于不支持global_path参数的算法，不传递该参数
+            return algorithm.plan(current_pos, target_pos, static_obstacles, dynamic_obstacles, velocity)
     
     def is_algorithm_available(self, name: str) -> bool:
         """检查算法是否可用"""

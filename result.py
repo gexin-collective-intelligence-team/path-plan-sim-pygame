@@ -51,10 +51,22 @@ def load_demo(file_name):
 
             dynamic_obstacle = DynamicObstacle(shape, position, direction, speed, size)
             dynamic_obstacles.append(dynamic_obstacle)
-    time = geojson_obj['time']
-    track = geojson_obj['track']
-    smoothness = geojson_obj['smoothness']
-    pathlen = geojson_obj['pathlen']
+    # 尝试从不同的键中获取路径数据，以兼容新旧格式
+    time = geojson_obj.get('time')
+    
+    # 优先使用optimized_track（如果存在），否则使用track
+    track = geojson_obj.get('optimized_track') or geojson_obj.get('track')
+    
+    smoothness = geojson_obj.get('smoothness')
+    pathlen = geojson_obj.get('pathlen', 0)
+    
+    # 如果没有找到track，尝试获取original_track
+    if track is None:
+        track = geojson_obj.get('original_track')
+        
+    # 如果仍然没有找到路径，返回一个空列表
+    if track is None:
+        track = []
     return Result_Demo(start=start_point, end=end_point, time=time, obstacles=obstacles,
                        dynamic_obstacles=dynamic_obstacles, track=track,
                        smoothness=smoothness, pathlen=pathlen)
@@ -94,8 +106,22 @@ def load_look(file_name):
             dynamic_obstacle = DynamicObstacle(shape, position, direction, speed, size)
             dynamic_obstacles.append(dynamic_obstacle)
 
+    # 尝试从不同的键中获取路径数据，以兼容新旧格式
+    track = None
+    if geojson_obj:
+        # 优先使用optimized_track（如果存在），否则使用track
+        track = geojson_obj.get('optimized_track') or geojson_obj.get('track')
+        
+        # 如果没有找到track，尝试获取original_track
+        if track is None:
+            track = geojson_obj.get('original_track')
+            
+        # 如果仍然没有找到路径，返回一个空列表
+        if track is None:
+            track = []
+    
     return Result_Demo(start=start_point, end=end_point, time=None, obstacles=obstacles,
-                       dynamic_obstacles=dynamic_obstacles, track=None,
+                       dynamic_obstacles=dynamic_obstacles, track=track,
                        smoothness=None, pathlen=0)
 
 class Result_Demo:

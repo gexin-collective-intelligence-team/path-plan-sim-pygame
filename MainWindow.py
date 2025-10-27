@@ -55,7 +55,7 @@ class Ui_MainWindow(object):
         label_speed.setGeometry(60, 130, 100, 30)
         slider_speed = QSlider(MainWindow)
         slider_speed.setGeometry(160, 130, 200, 30)
-        slider_speed.setMinimum(1)
+        slider_speed.setMinimum(0)
         slider_speed.setMaximum(10)
         slider_speed.setOrientation(Qt.Horizontal)
         label_speed_value = QLabel("1", MainWindow)
@@ -454,6 +454,7 @@ class Ui_MainWindow(object):
             for i in range(spin_box_value):
                 track = []  # 算法执行所得的路径
                 time = None  # 算法花费的时间
+                original_track = None  # 原始路径，未优化的路径
                 if radio_button_astar.isChecked():
                     obstacle_overlap = "Astar"
                     track, time = grid_widget.startAstar()
@@ -480,7 +481,7 @@ class Ui_MainWindow(object):
                     track, time = grid_widget.startApfRrt_dyn()
                 elif radio_button_costRRT .isChecked():
                     obstacle_overlap = "costRRT"
-                    track, time = grid_widget.startcostRrt()
+                    track, time, original_track = grid_widget.startcostRrt()
                 elif radio_button_dbvspRRT.isChecked():
                     obstacle_overlap = "dbvspRRT"
                     track, time = grid_widget.startDbvsPRrt()
@@ -488,7 +489,7 @@ class Ui_MainWindow(object):
                 # 保存结果部分
                 if radio_button_result_true.isChecked():
                     filepath = label_path.text()+"/"+line_edit_result.text()+str(i)+".txt"
-                    grid_widget.save_result(time1=time, track=track, file_path=filepath)
+                    grid_widget.save_result(time1=time, track=track, file_path=filepath, original_track=original_track)
 
         # 连接按钮的点击信号
         self.button_generate_obstacle.clicked.connect(on_button_click)

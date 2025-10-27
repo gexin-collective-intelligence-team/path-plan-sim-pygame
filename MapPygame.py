@@ -42,7 +42,7 @@ from arithmetic.RRT.rrt import Rrt
 from arithmetic.APFRRT.APFRRT import APFRRT
 
 from arithmetic.PRM.prm import prm
-
+from usv.motion_simulator import USVMotionSimulator
 # 导入局部路径规划模块
 import sys
 import os
@@ -50,6 +50,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from local_planner.local_planner_manager import LocalPlannerManager
 from local_planner.algorithms.apf_local_planner import APFLocalPlanner
 from local_planner.algorithms.dwa_local_planner import DWALocalPlanner
+from local_planner.path_optimizer import PathOptimizer
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -92,7 +93,7 @@ def draw_line(surface, color, start_pos, end_pos, radius):
         y = int(start_pos[1] + float(i) / distance * dy)
         pygame.draw.circle(surface, color, (x, y), radius)
 
-class USVMotionSimulator:
+
     """无人船实时运动模拟器"""
     def __init__(self, pygame_widget):
         self.widget = pygame_widget
@@ -104,13 +105,18 @@ class USVMotionSimulator:
         self.is_moving = False
 
         # 船舶参数
-        self.max_speed = 10.0  # 最大速度
+        self.max_speed = 20.0  # 最大速度（从10.0增加到20.0以提高航行速度）
         self.turn_rate = 0.1  # 转向率
         self.ship_radius = 8  # 船舶半径
+        self.arrival_threshold = 2.0  # 到达目标点的阈值，设置为较小的值使船舶更接近目标点
 
         # 碰撞状态标记
         self.has_collided = False
         self.collision_position = None
+        
+        # 历史轨迹记录
+        self.history_path = []  # 记录完整的航行轨迹
+        self.journey_completed = False  # 航行完成标记
 
         # 局部路径规划管理器
         self.local_planner_manager = LocalPlannerManager()
@@ -125,6 +131,10 @@ class USVMotionSimulator:
         self.local_algorithm = "无局部算法"
         self.local_planner_manager.set_current_algorithm("无局部算法")
 
+        # 实时局部路径
+        self.local_path = []  # 存储实时计算的局部路径
+        self.show_local_path = True  # 是否显示局部路径
+
         # 动画定时器
         self.motion_timer = QTimer()
         self.motion_timer.timeout.connect(self.update_position)
@@ -133,9 +143,11 @@ class USVMotionSimulator:
 
     def start_journey(self, start_pos, target_pos, planned_path):
         """开始航行"""
-        # 重置碰撞状态
+        # 重置状态
         self.has_collided = False
         self.collision_position = None
+        self.journey_completed = False
+        self.history_path = []  # 清空历史轨迹
         
         self.current_pos = np.array(start_pos, dtype=float)
         self.target_pos = target_pos
@@ -156,19 +168,210 @@ class USVMotionSimulator:
         print(f"已设置局部路径规划算法为: {algorithm_name}")
 
     def apply_local_algorithm(self, current_pos, target_pos, obstacles):
-        """应用局部路径规划算法"""
+        """应用局部路径规划算法并生成完整路径"""
         # 直接使用原始障碍物对象，无需格式转换
         static_obstacles = []  # 静态障碍物目前为空
         dynamic_obstacles = obstacles  # 动态障碍物直接使用原始对象
         
-        # 使用局部路径规划管理器
-        return self.local_planner_manager.plan_local_path(
+        # 使用局部路径规划管理器获取单个目标点
+        local_target = self.local_planner_manager.plan_local_path(
             np.array(current_pos),
             np.array(target_pos),
             static_obstacles,
             dynamic_obstacles,
             self.velocity
         )
+        
+        # 生成完整的局部路径（使用多个中间点）
+        if self.show_local_path and local_target is not None:
+            # 生成从当前位置到局部目标的平滑路径
+            self.local_path = self._generate_smooth_local_path(
+                current_pos, local_target, dynamic_obstacles
+            )
+        else:
+            self.local_path = []
+            
+        return local_target
+    
+    def _generate_smooth_local_path(self, start_pos, end_pos, dynamic_obstacles, num_points=25):
+        """修复后的智能多障碍物协同避障路径规划"""
+        start = np.array(start_pos)
+        end = np.array(end_pos)
+        
+        # 所有参数完全在函数内部定义
+        # 基础参数设置
+        SAFE_DISTANCE_STATIC = 35
+        SAFE_DISTANCE_DYNAMIC = 30  
+        SAFE_DISTANCE_BOUNDARY = 25
+        
+        # 计算距离，处理可能的除零错误
+        total_distance = max(np.linalg.norm(end - start), 1.0)  # 防止除零
+        
+        # 根据距离调整参数（简化版本，避免复杂条件）
+        if total_distance > 200:
+            K_att = 0.6
+            K_rep_static = 2.8
+            K_rep_dynamic = 2.2
+            K_rep_boundary = 1.8
+            SAFE_DISTANCE_STATIC = 40
+            SAFE_DISTANCE_DYNAMIC = 35
+            SAFE_DISTANCE_BOUNDARY = 30
+        elif total_distance < 100:
+            K_att = 1.0
+            K_rep_static = 2.2
+            K_rep_dynamic = 1.8
+            K_rep_boundary = 1.3
+            SAFE_DISTANCE_STATIC = 30
+            SAFE_DISTANCE_DYNAMIC = 25
+            SAFE_DISTANCE_BOUNDARY = 20
+        else:
+            K_att = 0.8
+            K_rep_static = 2.5
+            K_rep_dynamic = 2.0
+            K_rep_boundary = 1.5
+            SAFE_DISTANCE_STATIC = 35
+            SAFE_DISTANCE_DYNAMIC = 30
+            SAFE_DISTANCE_BOUNDARY = 25
+        
+        # 最大影响范围
+        MAX_INFLUENCE_STATIC = 85
+        MAX_INFLUENCE_DYNAMIC = 75
+        MAX_INFLUENCE_BOUNDARY = 55
+        
+        # 生成路径
+        path = [start.tolist()]
+        
+        # 用于跟踪附近障碍物数量
+        nearby_obstacles_count = 0
+        
+        for i in range(1, num_points):
+            t = i / num_points
+            
+            # 当前路径点
+            current_point = start + t * (end - start)
+            
+            # 计算总势场力
+            total_force = np.zeros(2)
+            
+            # 1. 目标吸引力（简化计算，避免除零）
+            distance_to_goal = max(np.linalg.norm(end - current_point), 1.0)
+            attraction_strength = K_att * (distance_to_goal / total_distance)
+            attraction_force = K_att * (end - current_point) * min(attraction_strength, 2.0)
+            total_force += attraction_force
+            
+            # 2. 静态障碍物斥力
+            if hasattr(self.widget, 'obstacles'):
+                nearby_obstacles_count = 0
+                for static_obstacle in self.widget.obstacles:
+                    try:
+                        static_polygon = Polygon(static_obstacle)
+                        point = Point(current_point[0], current_point[1])
+                        distance = max(static_polygon.distance(point), 0.1)  # 防止除零
+                        
+                        if distance < MAX_INFLUENCE_STATIC:
+                            nearby_obstacles_count += 1
+                            
+                            # 找到最近点
+                            nearest_point = static_polygon.exterior.interpolate(
+                                static_polygon.exterior.project(point)
+                            )
+                            nearest_coords = np.array([nearest_point.x, nearest_point.y])
+                            
+                            # 计算避障方向
+                            to_obstacle = current_point - nearest_coords
+                            repulsion_dir = to_obstacle / np.linalg.norm(to_obstacle)
+                            
+                            # 计算斥力强度（避免除零）
+                            if distance < SAFE_DISTANCE_STATIC:
+                                repulsion_strength = K_rep_static * (1.0/max(distance, 0.1) - 1.0/SAFE_DISTANCE_STATIC)
+                            else:
+                                repulsion_strength = K_rep_static * (1.0 - distance/MAX_INFLUENCE_STATIC)
+                            
+                            total_force += repulsion_dir * repulsion_strength * 20
+                    except Exception:
+                        # 处理几何计算异常
+                        continue
+            
+            # 3. 动态障碍物斥力（简化预测）
+            for obstacle in dynamic_obstacles:
+                if hasattr(obstacle, 'position') and hasattr(obstacle, 'size'):
+                    try:
+                        obs_pos = np.array(obstacle.position)
+                        obs_velocity = np.array(obstacle.direction) * obstacle.speed
+                        
+                        # 简化的预测：只考虑当前位置和预测0.5秒后的位置
+                        predicted_pos = obs_pos + obs_velocity * 0.5
+                        distance = max(np.linalg.norm(current_point - predicted_pos), 0.1)
+                        
+                        if distance < MAX_INFLUENCE_DYNAMIC:
+                            to_obstacle = current_point - predicted_pos
+                            repulsion_dir = to_obstacle / np.linalg.norm(to_obstacle)
+                            
+                            if distance < SAFE_DISTANCE_DYNAMIC:
+                                repulsion_strength = K_rep_dynamic * (1.0/max(distance, 0.1) - 1.0/SAFE_DISTANCE_DYNAMIC)
+                            else:
+                                repulsion_strength = K_rep_dynamic * (1.0 - distance/MAX_INFLUENCE_DYNAMIC)
+                            
+                            total_force += repulsion_dir * repulsion_strength * 15
+                    except Exception:
+                        continue
+            
+            # 4. 边界斥力（简化实现）
+            boundaries = [
+                (0, current_point[1], 0),           # 左边界
+                (self.widget.width, current_point[1], 0),  # 右边界
+                (current_point[0], 0, 1),           # 上边界
+                (current_point[0], self.widget.height, 1)   # 下边界
+            ]
+            
+            for boundary_val, current_val, axis in boundaries:
+                if axis == 0:  # x轴边界
+                    distance = max(abs(current_point[0] - boundary_val), 0.1)
+                    repulsion_dir = np.array([1, 0]) if boundary_val == 0 else np.array([-1, 0])
+                else:  # y轴边界
+                    distance = max(abs(current_point[1] - boundary_val), 0.1)
+                    repulsion_dir = np.array([0, 1]) if boundary_val == 0 else np.array([0, -1])
+                
+                if distance < MAX_INFLUENCE_BOUNDARY:
+                    if distance < SAFE_DISTANCE_BOUNDARY:
+                        repulsion_strength = K_rep_boundary * (1.0/max(distance, 0.1) - 1.0/SAFE_DISTANCE_BOUNDARY)
+                    else:
+                        repulsion_strength = K_rep_boundary * (1.0 - distance/MAX_INFLUENCE_BOUNDARY)
+                    
+                    total_force += repulsion_dir * repulsion_strength * 10
+            
+            # 5. 限制合力大小（防止过度震荡）
+            force_magnitude = np.linalg.norm(total_force)
+            if force_magnitude > 50:
+                total_force = (total_force / force_magnitude) * 50
+            elif force_magnitude > 0:
+                # 添加阻尼
+                total_force *= 0.8
+            
+            # 6. 计算新位置
+            step_factor = 0.7 if nearby_obstacles_count > 1 else 0.9
+            new_point = current_point + total_force * step_factor
+            
+            # 7. 边界保护（确保在合理范围内）
+            margin = 15
+            new_point[0] = max(margin, min(self.widget.width - margin, new_point[0]))
+            new_point[1] = max(margin, min(self.widget.height - margin, new_point[1]))
+            
+            path.append(new_point.tolist())
+        
+        # 简化路径平滑
+        if len(path) > 2:
+            # 简单的两点平滑
+            smoothed_path = [path[0]]
+            for i in range(1, len(path)):
+                if i % 2 == 0 or i == len(path) - 1:  # 保留关键点
+                    smoothed_path.append(path[i])
+            if len(smoothed_path) < 3:
+                smoothed_path = path
+            path = smoothed_path
+        
+        path.append(end.tolist())
+        return path
 
 
 
@@ -195,108 +398,129 @@ class USVMotionSimulator:
                         'obstacle_direction': obstacle.direction,
                         'obstacle_speed': obstacle.speed,
                         'collision_distance': distance,
-                        'required_clearance': collision_distance
+                        'required_clearance': collision_distance,
+                        'obstacle_type': 'dynamic'
                     }
                     return True, collision_info
         
         return False, None
 
+    def check_collision_with_static_obstacles(self, ship_pos):
+        """检测船舶与静态障碍物的碰撞"""
+        ship_radius = self.ship_radius
+        
+        if hasattr(self.widget, 'obstacles'):
+            for static_obstacle in self.widget.obstacles:
+                # 将静态障碍物转换为多边形
+                static_polygon = Polygon(static_obstacle)
+                
+                # 创建船舶的圆形区域
+                ship_circle = Point(ship_pos[0], ship_pos[1]).buffer(ship_radius)
+                
+                # 检查船舶与静态障碍物是否相交
+                if ship_circle.intersects(static_polygon):
+                    # 计算最近距离
+                    distance = static_polygon.distance(Point(ship_pos[0], ship_pos[1]))
+                    
+                    collision_info = {
+                        'ship_position': tuple(ship_pos),
+                        'obstacle_type': 'static',
+                        'obstacle_polygon': static_obstacle,
+                        'collision_distance': distance,
+                        'required_clearance': ship_radius
+                    }
+                    return True, collision_info
+        
+        return False, None
+
+    def check_all_obstacles_collision(self, ship_pos):
+        """检测船舶与所有类型障碍物的碰撞"""
+        # 先检查动态障碍物
+        collision, info = self.check_collision_with_dynamic_obstacles(ship_pos)
+        if collision:
+            return True, info
+            
+        # 再检查静态障碍物
+        collision, info = self.check_collision_with_static_obstacles(ship_pos)
+        if collision:
+            return True, info
+            
+        return False, None
+
     def update_position(self):
-        """实时更新船舶位置"""
+        """实时更新船舶位置 - 完全依赖APFLocalPlanner"""
         if not self.is_moving or self.path_index >= len(self.path):
+            # 检查是否航行完成
+            if self.path_index >= len(self.path) and len(self.path) > 0:
+                self.journey_completed = True
+                self.is_moving = False
             return
+
+        # 记录当前位置到历史轨迹
+        if len(self.history_path) == 0 or np.linalg.norm(np.array(self.current_pos) - np.array(self.history_path[-1])) > 1:
+            self.history_path.append(self.current_pos.copy())
 
         target_point = self.path[self.path_index]
         
-        # 获取动态障碍物信息用于局部算法
-        obstacles = []
+        # 获取障碍物信息
+        static_obstacles = []
+        dynamic_obstacles = []
+        
         if hasattr(self.widget, 'dynamic_obstacles'):
-            obstacles = self.widget.dynamic_obstacles
+            dynamic_obstacles = self.widget.dynamic_obstacles
+        
+        if hasattr(self.widget, 'obstacles'):
+            # 将静态障碍物转换为多边形格式
+            for obs in self.widget.obstacles:
+                static_obstacles.append(obs)
         
         # 碰撞检测
-        collision_detected, collision_info = self.check_collision_with_dynamic_obstacles(self.current_pos)
+        collision_detected, collision_info = self.check_all_obstacles_collision(self.current_pos)
         if collision_detected:
             print("🚨 碰撞检测！")
-            print(f"碰撞位置: {collision_info['ship_position']}")
-            print(f"障碍物位置: {collision_info['obstacle_position']}")
-            print(f"障碍物类型: {collision_info['obstacle_shape']}")
-            print(f"障碍物大小: {collision_info['obstacle_size']}")
-            print(f"障碍物方向: {collision_info['obstacle_direction']}")
-            print(f"障碍物速度: {collision_info['obstacle_speed']}")
-            print(f"实际距离: {collision_info['collision_distance']:.2f}")
-            print(f"安全距离: {collision_info['required_clearance']:.2f}")
-            print("算法终止运行！船舶已停止运动")
-            
-            # 停止算法运行，保持界面状态
             self.is_moving = False
-            
-            # 停止定时器
-            if hasattr(self, 'motion_timer'):
-                self.motion_timer.stop()
-                print("运动定时器已停止")
-            
-            # 在界面上标记碰撞状态
             self.has_collided = True
             self.collision_position = self.current_pos.copy()
-            
-            # 触发重绘以显示碰撞状态
+            if hasattr(self, 'motion_timer'):
+                self.motion_timer.stop()
             self.widget.update()
-            
-            # 返回，不再继续执行路径更新
             return
         
-        # 应用局部路径规划算法调整目标点
-        adjusted_target = self.apply_local_algorithm(self.current_pos, target_point, obstacles)
+        # 使用APFLocalPlanner计算下一步位置（实时避障）
+        next_pos = self.local_planner_manager.plan_local_path(
+            np.array(self.current_pos),
+            np.array(target_point),
+            static_obstacles,
+            dynamic_obstacles,
+            self.velocity
+        )
         
-        direction = np.array(adjusted_target) - self.current_pos
-        distance = np.linalg.norm(direction)
-
-        # 检查是否是最后一个路径点
-        is_final_target = (self.path_index == len(self.path) - 1)
+        # 更新位置
+        self.current_pos = np.array(next_pos)
         
-        # 最后一个路径点使用更小的阈值
-        arrival_threshold = 2.0 if is_final_target else 3.0
+        # 计算到当前路径点的距离
+        distance_to_target = np.linalg.norm(np.array(target_point) - self.current_pos)
         
-        if distance < arrival_threshold:  # 到达当前路径点
+        # 检查是否到达当前路径点
+        if distance_to_target < self.arrival_threshold:
             self.path_index += 1
             if self.path_index >= len(self.path):
-                # 确保船舶精确到达最终目标点
+                # 到达最终目标点
                 self.current_pos = np.array(self.path[-1])
+                self.history_path.append(self.current_pos.copy())
                 self.is_moving = False
-                print("航行完成！")
+                self.journey_completed = True
                 return
-            # 更新到下一个目标点，并应用局部算法
-            target_point = self.path[self.path_index]
-            adjusted_target = self.apply_local_algorithm(self.current_pos, target_point, obstacles)
-            direction = np.array(adjusted_target) - self.current_pos
-            distance = np.linalg.norm(direction)
-
-        # 平滑移动
-        if distance > 0:
-            direction_norm = direction / distance
-            
-            # 动态速度调整：接近目标时减速
-            if distance < 10:
-                # 接近目标时线性减速
-                speed_factor = max(0.1, distance / 10.0)
+        
+        # 更新速度向量（用于下次计算）
+        if len(self.path) > self.path_index:
+            next_target = self.path[self.path_index]
+            direction = np.array(next_target) - self.current_pos
+            if np.linalg.norm(direction) > 0:
+                self.velocity = direction / np.linalg.norm(direction) * self.max_speed
             else:
-                # 远离目标时保持正常速度
-                speed_factor = min(1.0, distance / 20.0)
-            
-            self.velocity = direction_norm * self.max_speed * speed_factor
-            
-            # 确保不会越过目标点
-            step_distance = np.linalg.norm(self.velocity)
-            if step_distance > distance:
-                self.current_pos = np.array(adjusted_target)
-            else:
-                self.current_pos += self.velocity
-            
-            # 打印调试信息
-            print(f"船舶位置: {self.current_pos}, 原始目标点: {target_point}, 调整后目标点: {adjusted_target}, 距离: {distance:.2f}, 局部算法: {self.local_algorithm}")
-        else:
-            self.velocity = np.zeros(2)
-
+                self.velocity = np.zeros(2)
+        
         # 触发重绘
         self.widget.update()
 
@@ -304,6 +528,34 @@ class USVMotionSimulator:
         """绘制船舶"""
         if self.current_pos is None:
             return
+
+        # 绘制优化后的全局路径（无论航行是否完成都显示）
+        if len(self.path) >= 2:
+            # 绘制优化后的全局路径（浅蓝色点线）
+            pygame.draw.lines(surface, (100, 100, 255), False, self.path, 2)
+            
+            # 绘制路径点
+            for i, point in enumerate(self.path):
+                if i == 0:
+                    # 路径起点（蓝色圆圈）
+                    pygame.draw.circle(surface, (0, 0, 255), (int(point[0]), int(point[1])), 6)
+                elif i == len(self.path) - 1:
+                    # 路径终点（红色圆圈）
+                    pygame.draw.circle(surface, (255, 0, 0), (int(point[0]), int(point[1])), 6)
+                else:
+                    # 路径中间点（浅蓝色点）
+                    pygame.draw.circle(surface, (100, 100, 255), (int(point[0]), int(point[1])), 3)
+
+        # 绘制航行完成后的完整历史轨迹
+        if self.journey_completed and len(self.history_path) >= 2:
+            # 绘制完整的历史轨迹（绿色粗线）
+            pygame.draw.lines(surface, (0, 255, 0), False, self.history_path, 4)
+            
+            # 添加轨迹信息文字
+            font = pygame.font.Font(None, 20)
+            info_text = f"航行完成! 轨迹点数: {len(self.history_path)}"
+            text_surface = font.render(info_text, True, (0, 255, 0))
+            surface.blit(text_surface, (10, self.widget.height - 30))
 
         # 检查是否发生碰撞
         if self.has_collided and self.collision_position is not None:
@@ -322,17 +574,37 @@ class USVMotionSimulator:
             text = font.render("COLLISION!", True, (255, 0, 0))
             surface.blit(text, (int(collision_x) + 20, int(collision_y) - 30))
             
-        else:
-            # 正常状态：绘制青色船舶
+        elif not self.journey_completed:
+            # 正常航行状态：绘制青色船舶
             angle = np.arctan2(self.velocity[1], self.velocity[0])
             points = self.get_ship_shape(self.current_pos, angle)
             pygame.draw.polygon(surface, (0, 255, 255), points)
 
-        # 绘制航迹 - 确保至少有2个点
-        if len(self.path) > 1 and self.path_index > 0:
-            path_to_draw = self.path[:self.path_index+1]
-            if len(path_to_draw) >= 2:
-                pygame.draw.lines(surface, (0, 100, 255), False, path_to_draw, 2)
+        # 绘制实时航迹（浅蓝色）
+        if not self.journey_completed and len(self.history_path) >= 2:
+            pygame.draw.lines(surface, (135, 206, 250), False, self.history_path, 2)
+
+        # 绘制实时局部路径
+        if not self.journey_completed and self.show_local_path and len(self.local_path) >= 2:
+            # 绘制局部路径规划器生成的实时路径（红色虚线）
+            if len(self.local_path) >= 3:
+                # 使用更粗的线条和更亮的颜色
+                pygame.draw.lines(surface, (255, 50, 50), False, self.local_path, 3)
+                
+                # 绘制路径点
+                for i, point in enumerate(self.local_path):
+                    if i == 0:
+                        # 起点（当前船舶位置）- 黄色
+                        pygame.draw.circle(surface, (255, 255, 0), (int(point[0]), int(point[1])), 4)
+                    elif i == len(self.local_path) - 1:
+                        # 终点（局部目标点）- 红色
+                        pygame.draw.circle(surface, (255, 0, 0), (int(point[0]), int(point[1])), 5)
+                    else:
+                        # 中间点 - 橙色
+                        pygame.draw.circle(surface, (255, 165, 0), (int(point[0]), int(point[1])), 2)
+            else:
+                # 简单直线路径
+                pygame.draw.lines(surface, (255, 100, 100), False, self.local_path, 2)
 
     def get_ship_shape(self, pos, angle):
         """获取船舶形状点"""
@@ -490,6 +762,8 @@ class PygameWidget(QWidget):
         self.offset_x = 0
         self.offset_x = 0
         self.result = None
+        # 新增：三次样条插值路径，避免重复计算
+        self.spline_path = None
         # 新增：实时运动模拟器
         self.motion_simulator = USVMotionSimulator(self)
 
@@ -503,30 +777,76 @@ class PygameWidget(QWidget):
             self.main_window.printf("请先规划路径！")
             return
 
-        # 统一路径格式为(x,y)元组列表
-        path_points = []
-        for point in self.result:
-            if hasattr(point, 'x') and hasattr(point, 'y'):
-                # 如果点是对象（有x,y属性）
-                path_points.append((point.x, point.y))
-            elif isinstance(point, (tuple, list)) and len(point) >= 2:
-                # 如果点是元组或列表
-                path_points.append((point[0], point[1]))
-            else:
-                # 其他情况，跳过
-                continue
+        # 优先使用已计算的三次样条插值路径
+        if self.spline_path is not None:
+            spline_result = self.spline_path
+            print(f"🚢 使用已计算的三次样条插值路径进行航行，路径点数: {len(spline_result)} 点")
+        else:
+            # 统一路径格式为(x,y)元组列表
+            path_coords = []
+            for point in self.result:
+                if hasattr(point, 'x') and hasattr(point, 'y'):
+                    # 如果点是对象（有x,y属性）
+                    path_coords.append((point.x, point.y))
+                elif isinstance(point, (tuple, list)) and len(point) >= 2:
+                    # 如果点是元组或列表
+                    path_coords.append((point[0], point[1]))
+                else:
+                    # 其他情况，跳过
+                    continue
 
-        if len(path_points) < 2:
+            # 使用三次样条插值对路径进行平滑处理，确保无人船沿着平滑路径行驶
+            path_optimizer = PathOptimizer()
+            spline_result = path_optimizer.cubic_spline_interpolation(path_coords, num_interpolated_points=100)
+            print(f"🚢 使用三次样条插值后的平滑路径进行航行: {len(path_coords)} → {len(spline_result)} 点")
+
+        if len(spline_result) < 2:
             self.main_window.printf("路径点数量不足，无法开始实时模拟！")
             return
+            
+        # 调试信息：打印动态障碍物数量
+        if hasattr(self, 'dynamic_obstacles'):
+            print(f"📊 开始实时航行前 - 当前动态障碍物数量: {len(self.dynamic_obstacles)}")
+            for i, obs in enumerate(self.dynamic_obstacles):
+                print(f"   障碍物{i+1}: 位置={obs.position}, 形状={obs.shape}, 大小={obs.size}")
+        else:
+            print("❌ 未找到dynamic_obstacles属性")
+
+        # 检查起点是否与任何障碍物发生碰撞
+        if hasattr(self, 'motion_simulator'):
+            print(f"🔍 进行起点碰撞检测 - 起点位置: {self.start_point}")
+            # 确保motion_simulator可以访问最新的障碍物信息
+            if hasattr(self.motion_simulator, 'widget'):
+                self.motion_simulator.widget = self  # 重新赋值widget引用，确保获取最新状态
+                
+            # 同时检查所有类型的障碍物（与航行过程中的碰撞检测逻辑保持一致）
+            collision, info = self.motion_simulator.check_all_obstacles_collision(self.start_point)
+            if collision:
+                obstacle_type = info.get('obstacle_type', '未知类型')
+                self.main_window.printf(f"无法开始航行！起点位置与{obstacle_type}障碍物发生碰撞，请重新设置起点或移除该障碍物")
+                print(f"🚨 起点碰撞检测：与{obstacle_type}障碍物在距离 {info['collision_distance']:.2f} 处碰撞")
+                return
+            else:
+                print("✅ 起点碰撞检测通过，无碰撞")
+        else:
+            print("⚠️ 未找到motion_simulator，跳过起点碰撞检测")
 
         # 注意：不同算法的路径方向已在各自算法中处理，无需再反转
         # 移除无条件的路径反转，避免方向错误
+        
+        # 新增：路径稀疏化处理，减少全局路径点数量
+        # 创建APF规划器实例用于路径稀疏化
+        from local_planner.algorithms.apf_local_planner import APFLocalPlanner
+        apf_planner = APFLocalPlanner()
+        
+        # 对spline_path进行稀疏化处理，默认距离阈值为50.0
+        sparse_path = apf_planner.discretize_path(spline_result)
+        print(f"🎯 使用稀疏化后的路径进行局部规划：{len(spline_result)} → {len(sparse_path)} 点")
 
         self.motion_simulator.start_journey(
             self.start_point,
             self.end_point,
-            path_points
+            sparse_path  # 使用稀疏化后的路径
         )
     # A*算法
     def startAstar(self):
@@ -539,6 +859,16 @@ class PygameWidget(QWidget):
             for k in self.result:
                 pygame.draw.circle(self.plan_surface, (0, 100, 255), (k.x, k.y), 3)
                 # time.sleep(0.1)
+            
+            # 路径优化：对原始路径进行稀疏化处理
+            if len(self.result) > 2:
+                path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+                path_coords = [(p.x, p.y) for p in self.result]
+                key_points = path_optimizer.extract_key_points(path_coords)
+                from arithmetic.Astar.Node import point
+                optimized_result = [point(x, y) for x, y in key_points]
+                print(f"🔄 Astar路径优化: {len(self.result)} → {len(optimized_result)} 点")
+                self.result = optimized_result
 
     # RRT算法
     def startRtt(self):
@@ -546,6 +876,33 @@ class PygameWidget(QWidget):
         self.result = None
         self.search = Rrt(self)
         self.result, time1 = self.search.plan(self.plan_surface)
+        
+        # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
+        if self.result is not None and len(self.result) > 2:
+            # 创建路径优化器
+            path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+            
+            # 转换路径格式
+            path_coords = [(p.x, p.y) for p in self.result]
+            key_points = path_optimizer.extract_key_points(path_coords)
+            
+            # 确保起点和终点
+            if key_points:
+                if key_points[0] != (self.start_point[0], self.start_point[1]):
+                    key_points.insert(0, (self.start_point[0], self.start_point[1]))
+                if key_points[-1] != (self.end_point[0], self.end_point[1]):
+                    key_points.append((self.end_point[0], self.end_point[1]))
+            
+            # 创建新的优化路径（复制新对象）
+            from arithmetic.RRT.Node import point
+            optimized_result = [point(x, y) for x, y in key_points]
+            
+            # 打印优化统计
+            print(f"🔄 RRT路径优化: {len(self.result)} → {len(optimized_result)} 点")
+            
+            # 使用优化后的路径
+            self.result = optimized_result
+        
         if self.result is not None:
             for k in self.result:
                 pygame.draw.circle(self.plan_surface, (0, 100, 255), (k.x, k.y), 3)
@@ -558,13 +915,31 @@ class PygameWidget(QWidget):
             x = point.x
             y = point.y
             track.append((x, y))
-        # self.save_result(time1,track)
         return track, time1
     def startRRTStar(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
         self.search = RrtStar(self)
         self.result, time = self.search.plan(self.plan_surface)
+        
+        # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
+        if self.result is not None and len(self.result) > 2:
+            path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+            path_coords = [(p.x, p.y) for p in self.result]
+            key_points = path_optimizer.extract_key_points(path_coords)
+            
+            # 确保起点和终点
+            if key_points:
+                if key_points[0] != (self.start_point[0], self.start_point[1]):
+                    key_points.insert(0, (self.start_point[0], self.start_point[1]))
+                if key_points[-1] != (self.end_point[0], self.end_point[1]):
+                    key_points.append((self.end_point[0], self.end_point[1]))
+            
+            from arithmetic.RRT.Node import point
+            optimized_result = [point(x, y) for x, y in key_points]
+            print(f"🔄 RRT*路径优化: {len(self.result)} → {len(optimized_result)} 点")
+            self.result = optimized_result
+        
         track = []
         for point in self.result:
             x = point.x
@@ -576,6 +951,25 @@ class PygameWidget(QWidget):
         self.result = None
         self.search = BiRrt(self)
         self.result, time = self.search.plan(self.plan_surface)
+        
+        # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
+        if self.result is not None and len(self.result) > 2:
+            path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+            path_coords = [(p.x, p.y) for p in self.result]
+            key_points = path_optimizer.extract_key_points(path_coords)
+            
+            # 确保起点和终点
+            if key_points:
+                if key_points[0] != (self.start_point[0], self.start_point[1]):
+                    key_points.insert(0, (self.start_point[0], self.start_point[1]))
+                if key_points[-1] != (self.end_point[0], self.end_point[1]):
+                    key_points.append((self.end_point[0], self.end_point[1]))
+            
+            from arithmetic.RRT.Node import point
+            optimized_result = [point(x, y) for x, y in key_points]
+            print(f"🔄 BiRRT路径优化: {len(self.result)} → {len(optimized_result)} 点")
+            self.result = optimized_result
+        
         if self.result is not None:
             for k in range(len(self.result) - 1):
                 pygame.draw.line(self.plan_surface, (0, 100, 255), (self.result[k].x, self.result[k].y),
@@ -584,7 +978,6 @@ class PygameWidget(QWidget):
         for point in self.result:
             x = point.x
             y = point.y
-            #print(x,y);
             track.append((x, y))
         return track, time
     def startApf(self):
@@ -592,8 +985,26 @@ class PygameWidget(QWidget):
         self.result = None
         self.search = apf(self)
         self.result, time = self.search.plan(self.plan_surface)
+        
+        # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
+        if self.result is not None and len(self.result) > 2:
+            path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+            path_coords = [(p[0], p[1]) for p in self.result]
+            key_points = path_optimizer.extract_key_points(path_coords)
+            
+            # 确保起点和终点
+            if key_points:
+                if key_points[0] != (self.start_point[0], self.start_point[1]):
+                    key_points.insert(0, (self.start_point[0], self.start_point[1]))
+                if key_points[-1] != (self.end_point[0], self.end_point[1]):
+                    key_points.append((self.end_point[0], self.end_point[1]))
+            
+            optimized_result = [(x, y) for x, y in key_points]
+            print(f"🔄 APF路径优化: {len(self.result)} → {len(optimized_result)} 点")
+            self.result = optimized_result
+        
         track = []
-        for point in self.result[:-1]:
+        for point in self.result:
             track.append((point[0], point[1]))
         return track, time
 
@@ -601,114 +1012,277 @@ class PygameWidget(QWidget):
         self.plan_surface.fill(self.back_color)
         self.result = None
         self.result, time = APFRRT(self).plan(self.plan_surface)
+        
+        # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
+        if self.result is not None and len(self.result) > 2:
+            path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+            path_coords = [(p.x, p.y) for p in self.result]
+            key_points = path_optimizer.extract_key_points(path_coords)
+            
+            # 确保起点和终点
+            if key_points:
+                if key_points[0] != (self.start_point[0], self.start_point[1]):
+                    key_points.insert(0, (self.start_point[0], self.start_point[1]))
+                if key_points[-1] != (self.end_point[0], self.end_point[1]):
+                    key_points.append((self.end_point[0], self.end_point[1]))
+            
+            from arithmetic.APFRRT.Node import point
+            optimized_result = [point(x, y) for x, y in key_points]
+            print(f"🔄 APFRRT路径优化: {len(self.result)} → {len(optimized_result)} 点")
+            self.result = optimized_result
+        
         track = []
-        for point in self.result[:-1]:
+        for point in self.result:
             track.append((point.x, point.y))
-        return track, time
+        
+        # 转换原始路径为坐标列表
+        original_track = []
+        if original_path is not None:
+            for point in original_path:
+                original_track.append((point.x, point.y))
+        
+        return track, time, original_track
     def startApfRrt_dyn(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
         self.result, time = APFRRT_dyn(self).plan(self.plan_surface)
+        
+        # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
+        if self.result is not None and len(self.result) > 2:
+            path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+            path_coords = [(p.x, p.y) for p in self.result]
+            key_points = path_optimizer.extract_key_points(path_coords)
+            
+            # 确保起点和终点
+            if key_points:
+                if key_points[0] != (self.start_point[0], self.start_point[1]):
+                    key_points.insert(0, (self.start_point[0], self.start_point[1]))
+                if key_points[-1] != (self.end_point[0], self.end_point[1]):
+                    key_points.append((self.end_point[0], self.end_point[1]))
+            
+            from arithmetic.APFRRT.Node import point
+            optimized_result = [point(x, y) for x, y in key_points]
+            print(f"🔄 APFRRT_dyn路径优化: {len(self.result)} → {len(optimized_result)} 点")
+            self.result = optimized_result
+        
         track = []
-        for point in self.result[:-1]:
+        for point in self.result:
             track.append((point.x, point.y))
         return track, time
     def startDbvsPRrt(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
         self.result, time = dbvsAPFRRT_dyn(self).plan(self.plan_surface)
+        
+        # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
+        if self.result is not None and len(self.result) > 2:
+            path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+            path_coords = [(p.x, p.y) for p in self.result]
+            key_points = path_optimizer.extract_key_points(path_coords)
+            
+            # 确保起点和终点
+            if key_points:
+                if key_points[0] != (self.start_point[0], self.start_point[1]):
+                    key_points.insert(0, (self.start_point[0], self.start_point[1]))
+                if key_points[-1] != (self.end_point[0], self.end_point[1]):
+                    key_points.append((self.end_point[0], self.end_point[1]))
+            
+            from arithmetic.APFRRT.Node import point
+            optimized_result = [point(x, y) for x, y in key_points]
+            print(f"🔄 dbvsAPFRRT_dyn路径优化: {len(self.result)} → {len(optimized_result)} 点")
+            self.result = optimized_result
+        
         track = []
-        for point in self.result[:-1]:
+        for point in self.result:
             track.append((point.x, point.y))
         return track, time
     def startPRm(self):
         self.result = None
         self.result, time = prm(self).plan(self.plan_surface)
+        
+        # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
+        if self.result is not None and len(self.result) > 2:
+            path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+            path_coords = [(p.x, p.y) for p in self.result]
+            key_points = path_optimizer.extract_key_points(path_coords)
+            
+            # 确保起点和终点
+            if key_points:
+                if key_points[0] != (self.start_point[0], self.start_point[1]):
+                    key_points.insert(0, (self.start_point[0], self.start_point[1]))
+                if key_points[-1] != (self.end_point[0], self.end_point[1]):
+                    key_points.append((self.end_point[0], self.end_point[1]))
+            
+            from arithmetic.RRT.Node import point
+            optimized_result = [point(x, y) for x, y in key_points]
+            print(f"🔄 PRM路径优化: {len(self.result)} → {len(optimized_result)} 点")
+            self.result = optimized_result
+        
         track = []
-        for point in self.result[:-1]:
+        for point in self.result:
             track.append((point.x, point.y))
         return track, time
     def startcostRrt(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
         self.result, time = Cost_Rrt(self).plan(self.plan_surface)
+        
+        # 保存原始路径的副本
+        original_path = self.result.copy() if self.result is not None else None
+        
+        # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
+        if self.result is not None and len(self.result) > 2:
+            path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+            path_coords = [(p.x, p.y) for p in self.result]
+            key_points = path_optimizer.extract_key_points(path_coords,self.obstacles)
+            
+            # 确保起点和终点
+            if key_points:
+                if key_points[0] != (self.start_point[0], self.start_point[1]):
+                    key_points.insert(0, (self.start_point[0], self.start_point[1]))
+                if key_points[-1] != (self.end_point[0], self.end_point[1]):
+                    key_points.append((self.end_point[0], self.end_point[1]))
+            
+            from arithmetic.RRT.Node import point
+            optimized_result = [point(x, y) for x, y in key_points]
+            print(f"🔄 CostRRT路径优化: {len(self.result)} → {len(optimized_result)} 点")
+            
+            # 使用三次样条插值法进一步平滑路径
+            spline_result = path_optimizer.cubic_spline_interpolation(key_points, num_interpolated_points=100)
+            print(f"🔄 三次样条插值: {len(optimized_result)} → {len(spline_result)} 点")
+            
+            # 保存三次样条插值路径到类属性，避免重复计算
+            self.spline_path = spline_result
+            
+            # 绘制优化后的路径
+            for k in spline_result:
+                pygame.draw.circle(self.plan_surface, (0, 255, 0), (int(k[0]), int(k[1])), 1)
+            
+            # 更新结果为原始优化结果（保留稀疏点用于其他处理）
+            self.result = optimized_result
+           
+        if self.result is not None:
+            for k in self.result:
+                pygame.draw.circle(self.plan_surface, (0, 100, 255), (k.x, k.y), 3)
+        if self.result is not None:
+            for k in range(len(self.result) - 1):
+                pygame.draw.line(self.plan_surface, (0, 100, 255), (self.result[k].x, self.result[k].y),
+                                 (self.result[k + 1].x, self.result[k + 1].y), 3)
         track = []
-        for point in self.result[:-1]:
-            track.append((point.x, point.y))
-        return track, time
-    def save_result(self, time1, track, file_path):
+        # 返回三次样条插值后的路径点
+        if self.result is not None:
+            path_coords = [(p.x, p.y) for p in self.result]
+            path_optimizer = PathOptimizer()
+            spline_result = path_optimizer.cubic_spline_interpolation(path_coords, num_interpolated_points=100)
+            track = spline_result
+        # 转换原始路径为坐标列表
+        original_track = []
+        if original_path is not None:
+            for point in original_path:
+                original_track.append((point.x, point.y))
+        
+        return track, time, original_track
+        
+    def save_result(self, time1, track, file_path, original_track=None):
         """
         保存结果文件，包括地图
         :param time1: 运行的时间
-        :param track: 路径 [(x,y),(x,y),...]
+        :param track: 优化后的路径 [(x,y),(x,y),...]
+        :param file_path: 文件保存路径
+        :param original_track: 原始路径 [(x,y),(x,y),...]
         :return:
         """
-        # # 创建文件对话框
-        # dialog = QFileDialog()
-        # # 设置文件对话框为保存文件模式
-        # dialog.setAcceptMode(QFileDialog.AcceptSave)
-        # # 设置对话框标题
-        # dialog.setWindowTitle('保存地图')
-        # # 设置文件过滤器
-        # dialog.setNameFilter('地图文件 (*.txt)')
-        # # 设置默认文件名，包含文件类型后缀
-        # dialog.setDefaultSuffix('txt')
-
-        # 打开文件对话框，并返回保存的文件路径
-        # file_path, _ = dialog.getSaveFileName(self, '保存地图', '', '地图文件 (*.txt)')
-
+      
+      
         if file_path is None:
             self.main_window.printf("路径未选择！", None, None)
             return
 
-        features = []
+        # 生成第二个文件的路径（优化路径文件）
+        import os
+        file_dir, file_name = os.path.split(file_path)
+        file_base, file_ext = os.path.splitext(file_name)
+        optimized_file_path = os.path.join(file_dir, f"{file_base}_optimized{file_ext}")
 
-        # feature_collection = None
+        # 创建地图和障碍物的feature_collection
+        def create_map_features():
+            features = []
+            if self.obstacles is not None:
+                for obstacle in self.obstacles:
+                    if obstacle[0] != obstacle[-1]:
+                        obstacle.append(obstacle[0])
+                    features.append(
+                        geojson.Feature(geometry=geojson.Polygon([obstacle]), properties={"name": "障碍物"}))
 
-        if self.obstacles is not None:
-            for obstacle in self.obstacles:
-                if obstacle[0] != obstacle[-1]:
-                    obstacle.append(obstacle[0])
-                features.append(
-                    geojson.Feature(geometry=geojson.Polygon([obstacle]), properties={"name": "障碍物"}))
+            if self.start_point is not None and self.end_point is not None:
+                start_point = Point(self.start_point)
+                end_point = Point(self.end_point)
+                features.append(Feature(geometry=start_point, properties={"name": "起始点"}))
+                features.append(Feature(geometry=end_point, properties={"name": "终点"}))
+            if self.dynamic_obstacles is not None:
+                for dynamic_obstacle in self.dynamic_obstacles:
+                    shape=dynamic_obstacle.shape
+                    position = dynamic_obstacle.position
+                    direction = dynamic_obstacle.direction
+                    speed = dynamic_obstacle.speed
+                    size = dynamic_obstacle.size
+                    # 创建动态障碍物的GeoJSON对象
+                    dynamic_feature = geojson.Feature(
+                        geometry=geojson.Point(position),
+                        properties={
+                            "type": "dynamic_obstacle",
+                            "name": "动态障碍物",
+                            "shape":shape,
+                            "direction": direction,
+                            "speed": speed,
+                            "size": size
+                        }
+                    )
+                    features.append(dynamic_feature)
+            return FeatureCollection(features)
 
-        if self.start_point is not None and self.end_point is not None:
-            start_point = Point(self.start_point)
-            end_point = Point(self.end_point)
-            features.append(Feature(geometry=start_point, properties={"name": "起始点"}))
-            features.append(Feature(geometry=end_point, properties={"name": "终点"}))
-        if self.dynamic_obstacles is not None:
-            for dynamic_obstacle in self.dynamic_obstacles:
-                shape=dynamic_obstacle.shape
-                position = dynamic_obstacle.position
-                direction = dynamic_obstacle.direction
-                speed = dynamic_obstacle.speed
-                size = dynamic_obstacle.size
-                # 创建动态障碍物的GeoJSON对象
-                dynamic_feature = geojson.Feature(
-                    geometry=geojson.Point(position),
-                    properties={
-                        "type": "dynamic_obstacle",
-                        "name": "动态障碍物",
-                        "shape":shape,
-                        "direction": direction,
-                        "speed": speed,
-                        "size": size
-                    }
-                )
-                features.append(dynamic_feature)
-        feature_collection = FeatureCollection(features)
-        # 先封装经过计算再存入结果文件
-        r = Result_Demo(self.start_point, self.end_point, time1, self.obstacles, self.dynamic_obstacles,track)
+        # 保存第一个文件：地图信息和原始路径
+        feature_collection = create_map_features()
         js2 = json.loads(str(feature_collection))
-        js = dict(time=time1, track=track, smoothness=r.smoothness, pathlen=r.pathlen)  # 加入r中计算的数据到结果类中
-        js2.update(js)
-        print(js2)
+        
+        # 如果有原始路径，则保存到第一个文件
+        if original_track is not None:
+            r_original = Result_Demo(self.start_point, self.end_point, time1, self.obstacles, self.dynamic_obstacles, original_track)
+            js_original = dict(time=time1, track=original_track, smoothness=r_original.smoothness, pathlen=r_original.pathlen)
+            js2.update(js_original)
+        else:
+            # 如果没有原始路径，使用优化路径作为备用
+            r = Result_Demo(self.start_point, self.end_point, time1, self.obstacles, self.dynamic_obstacles, track)
+            js = dict(time=time1, track=track, smoothness=r.smoothness, pathlen=r.pathlen)
+            js2.update(js)
+        
         # 将FeatureCollection保存为GeoJSON格式的字符串
         geojson_str = json.dumps(js2, indent=4)
         with open(file_path, 'w') as file:
             file.write(geojson_str)
-        self.main_window.printf("地图和结果数据已成功保存！", None, None)
+        self.main_window.printf(f"地图和原始路径已成功保存到 {file_path}！", None, None)
+
+        # 保存第二个文件：原始路径和优化后的路径（如果有优化路径）
+        if track is not None and track != original_track:
+            feature_collection_optimized = create_map_features()
+            js2_optimized = json.loads(str(feature_collection_optimized))
+            
+            # 保存原始路径和优化后的路径
+            r_optimized = Result_Demo(self.start_point, self.end_point, time1, self.obstacles, self.dynamic_obstacles, track)
+            js_optimized = {
+                "time": time1,
+                "original_track": original_track if original_track is not None else [],
+                "optimized_track": track,
+                "smoothness": r_optimized.smoothness,
+                "pathlen": r_optimized.pathlen
+            }
+            js2_optimized.update(js_optimized)
+            
+            # 将FeatureCollection保存为GeoJSON格式的字符串
+            geojson_str_optimized = json.dumps(js2_optimized, indent=4)
+            with open(optimized_file_path, 'w') as file:
+                file.write(geojson_str_optimized)
+            self.main_window.printf(f"原始路径和优化后的路径已成功保存到 {optimized_file_path}！", None, None)
 
     # 保存地图文件
     def save_map(self):
@@ -1009,11 +1583,11 @@ class PygameWidget(QWidget):
         self.update_dynamic_obstacles()
         # 绘制动态障碍物
         self.draw_dynamic_obstacles()
-        #将多个表面叠加
-        self.surface.blit(self.obs_surface, (0, 0))
-        self.surface.blit(self.dynamic_surface, (0, 0))
-        self.surface.blit(self.point_surface, (0, 0))
-        self.surface.blit(self.plan_surface, (0, 0))
+        #将多个表面叠加 - 调整绘制顺序，确保点显示在障碍物上方
+        self.surface.blit(self.obs_surface, (0, 0))  # 静态障碍物
+        self.surface.blit(self.dynamic_surface, (0, 0))  # 动态障碍物
+        self.surface.blit(self.point_surface, (0, 0))  # 起点终点（移到后面绘制）
+        self.surface.blit(self.plan_surface, (0, 0))  # 规划路径
         if self.grid:
             self.surface.blit(self.grid_surface, (0, 0))
 
@@ -1213,6 +1787,15 @@ class PygameWidget(QWidget):
         self.plan_surface.fill(self.back_color)
         self.point_surface.fill(self.back_color)
         self.grid_surface.fill(self.back_color)
+        
+        # 清除实时航行路径
+        if hasattr(self, 'motion_simulator'):
+            self.motion_simulator.history_path = []  # 清空历史轨迹
+            self.motion_simulator.local_path = []  # 清空局部路径
+            self.motion_simulator.is_moving = False  # 停止运动
+            self.motion_simulator.journey_completed = False  # 重置完成状态
+            self.motion_simulator.has_collided = False  # 重置碰撞状态
+            
         self.update_map()
         self.main_window.printf("已经清空地图")
         # self.update()  # 更新界面
@@ -1233,6 +1816,21 @@ class PygameWidget(QWidget):
         self.point_surface.fill(self.back_color)
         # 清空plan_surface
         self.plan_surface.fill(self.back_color)
+        
+        # 重新绘制起点和终点，确保它们在清空图层后保持正确颜色显示
+        if hasattr(self, 'start_point') and self.start_point is not None:
+            # 绿色绘制起点
+            pygame.draw.circle(self.point_surface, (0, 255, 0), 
+                              (int(self.start_point[0]), int(self.start_point[1])), 
+                              self.point_radius)
+        if hasattr(self, 'end_point') and self.end_point is not None:
+            # 红色绘制终点
+            pygame.draw.circle(self.point_surface, (255, 0, 0), 
+                              (int(self.end_point[0]), int(self.end_point[1])), 
+                              self.point_radius)
+            pygame.draw.circle(self.point_surface, (0, 255, 0), self.start_point, self.point_radius)
+        if self.end_point:
+            pygame.draw.circle(self.point_surface, (255, 0, 0), self.end_point, self.point_radius)
 
     # 未栅格化地图障碍点获取
     def get_obs_vertices(self):

@@ -1,19 +1,16 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+from .Node import point
 import math
-import time
-import random
-
-import numpy as np
-from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout
-from scipy.interpolate import CubicSpline
-from shapely import LineString
-from shapely.geometry import Point, Polygon
 import pygame
-from shapely.ops import nearest_points
+import random
+import time
+import copy
+from collections import deque
 
-from arithmetic.APFRRT.Node import point
-
-
-class APFRRT_dyn():
+class dapfRRT:
     def __init__(self, mapdata):
         self.safe_distance = 100
         self.Predict_time = 0.5
@@ -578,10 +575,40 @@ class APFRRT_dyn():
                 print("总迭代次数为")
                 print(i)
                 # 1. 去冗余优化
-                #optimized_path = self.remove_redundant_points(path)
-                #print("去冗余后的路径点数：", len(optimized_path))
-                smoothed_path = self.smooth_path_bezier(path, 100)
-                #smoothed_path=self.smooth_path_cubic_spline(path)
+                optimized_path = self.remove_redundant_points(path)
+                print("🔄 去冗余后的路径点数：", len(optimized_path))
+                
+                # 2. 平滑路径（减少点数）
+                smoothed_path = self.smooth_path_bezier(optimized_path, 50)  # 从100减少到50
+                
+                # 3. 关键路径点提取
+                path_optimizer = PathOptimizer(min_segment_length=80.0, angle_threshold=25.0)
+                
+                # 转换路径格式为坐标列表
+                path_coords = [(p.x, p.y) for p in smoothed_path]
+                key_points = path_optimizer.extract_key_points(path_coords)
+                
+                # 4. 转换回Point对象
+                final_path = [point(x, y) for x, y in key_points]
+                
+                # 5. 可视化优化后的路径
+                if len(final_path) >= 2:
+                    for i in range(len(final_path) - 1):
+                        pygame.draw.line(plan_surface, (255, 255, 0), 
+                                       (final_path[i].x, final_path[i].y),
+                                       (final_path[i+1].x, final_path[i+1].y), 6)
+                
+                # 6. 绘制关键路径点
+                for point in final_path:
+                    pygame.draw.circle(plan_surface, (128, 0, 128), (point.x, point.y), 6)
+                
+                # 7. 打印优化统计信息
+                print("✅ 最终关键路径点数：", len(final_path), "(原始:", len(path), ")")
+                print("📊 路径优化统计：")
+                print("   压缩比：{:.2f}".format(len(final_path) / len(path)))
+                
+                return final_path, end - start
+                smoothed_path=self.smooth_path_cubic_spline(path)
                 #smoothed_path.append(self.end)
                 # 可视化平滑后的路径（用线连接点）
                 for k in range(len(smoothed_path) - 1):
