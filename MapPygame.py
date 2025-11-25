@@ -35,6 +35,7 @@ from arithmetic.RRT.BiRRT import BiRrt
 from arithmetic.RRT.RRTstar import RrtStar
 from arithmetic.RRT.costRRT import Cost_Rrt
 from arithmetic.RRT.rrt import Rrt
+from local_planner.path_optimizer import PathOptimizer
 
 from result import Result_Demo
 
@@ -213,7 +214,8 @@ def load_map_file(self, file_path: str) -> bool:
                 direction = tuple(properties.get('direction', (1, 0)))
                 speed = properties.get('speed', 1.0)
                 size = properties.get('size', 20.0)
-                dynamic_obstacles.append(DynamicObstacle(shape, position, direction, speed, size))
+                bounce = properties.get('bounce', True)  # 默认反弹，兼容旧文件
+                dynamic_obstacles.append(DynamicObstacle(shape, position, direction, speed, size, bounce))
 
         # 写入当前 widget
         self.obstacles = obstacles
@@ -280,7 +282,7 @@ def draw_line(surface, color, start_pos, end_pos, radius):
         self.is_moving = False
 
         # 船舶参数
-        self.max_speed = 20.0  # 最大速度（从10.0增加到20.0以提高航行速度）
+        self.max_speed = 25.0  # 最大速度（适当调高，提高航行速度）
         self.turn_rate = 0.1  # 转向率
         self.ship_radius = 8  # 船舶半径
         self.arrival_threshold = 2.0  # 到达目标点的阈值，设置为较小的值使船舶更接近目标点
@@ -776,10 +778,17 @@ def draw_line(surface, color, start_pos, end_pos, radius):
                         pygame.draw.circle(surface, (255, 0, 0), (int(point[0]), int(point[1])), 5)
                     else:
                         # 中间点 - 橙色
-                        pygame.draw.circle(surface, (255, 165, 0), (int(point[0]), int(point[1])), 2)
-            else:
-                # 简单直线路径
-                pygame.draw.lines(surface, (255, 100, 100), False, self.local_path, 2)
+                        pygame.draw.circle(surface, (255, 165, 0), (int(point[0]), int(point[1])), 3)
+
+        # 实时显示无人船速度（标量）
+        try:
+            speed = float(np.linalg.norm(self.velocity))
+            font = pygame.font.Font(None, 22)
+            text = f"Speed: {speed:.2f}"
+            text_surface = font.render(text, True, (0, 0, 0))
+            surface.blit(text_surface, (10, 10))
+        except Exception:
+            pass
 
     def get_ship_shape(self, pos, angle):
         """获取船舶形状点"""
@@ -896,6 +905,10 @@ class PygameWidget(QWidget):
         self.last_pos = None
         self.grid = False
 
+        # 图形障碍物临时配置（由主窗口设置，鼠标点击时使用）
+        self.pending_graph_shape = None  # 1-矩形, 2-圆形, 3-三角形, 4-椭圆, 5-菱形, 6-五角星
+        self.pending_graph_size = None
+
         self.main_window = main_window
         # 矩形初始位置和大小
         self.rect_size = 50
@@ -946,38 +959,83 @@ class PygameWidget(QWidget):
         self.ship_surface = pygame.Surface((self.width, self.height))
         self.ship_surface.set_colorkey(self.back_color)
 
+        # 实时快照相关：从主窗口继承配置
+        self.snapshot_enabled = getattr(self.main_window, 'snapshot_enabled', False)
+        self.snapshot_dir = getattr(self.main_window, 'snapshot_dir', "")
+        self.snapshot_index = 0
+        self.final_snapshot_taken = False  # 终点快照是否已保存
+        self.snapshot_start_time = None    # 快照开始时间，用于时间上限控制
+
+        # 定时器：每 500ms 触发一次截图尝试
+        self.snapshot_timer = QTimer(self)
+        self.snapshot_timer.timeout.connect(self._maybe_save_snapshot)
+        self.snapshot_timer.start(500)
+
     def start_realtime_simulation(self):
         """开始实时模拟"""
-        if not self.result or not self.start_point or not self.end_point:
-            self.main_window.printf("请先规划路径！")
+        # 仅要求起点和终点存在
+        if not self.start_point or not self.end_point:
+            self.main_window.printf("请先设置起点和终点！")
             return
 
-        # 优先使用已计算的三次样条插值路径
-        if self.spline_path is not None:
-            spline_result = self.spline_path
-            print(f"🚢 使用已计算的三次样条插值路径进行航行，路径点数: {len(spline_result)} 点")
+        path_for_motion = None  # 传给运动模拟器的路径
+
+        # 情况一：存在规划结果 self.result，按原逻辑生成平滑/稀疏化路径
+        if self.result and len(self.result) >= 2:
+            # 优先使用已计算的三次样条插值路径
+            if self.spline_path is not None:
+                spline_result = self.spline_path
+                print(f"🚢 使用已计算的三次样条插值路径进行航行，路径点数: {len(spline_result)} 点")
+            else:
+                # 统一路径格式为(x,y)元组列表
+                path_coords = []
+                for point in self.result:
+                    if hasattr(point, 'x') and hasattr(point, 'y'):
+                        # 如果点是对象（有x,y属性）
+                        path_coords.append((point.x, point.y))
+                    elif isinstance(point, (tuple, list)) and len(point) >= 2:
+                        # 如果点是元组或列表
+                        path_coords.append((point[0], point[1]))
+                    else:
+                        # 其他情况，跳过
+                        continue
+
+                # 使用三次样条插值对路径进行平滑处理，确保无人船沿着平滑路径行驶
+                path_optimizer = PathOptimizer()
+                spline_result = path_optimizer.cubic_spline_interpolation(path_coords, num_interpolated_points=100)
+                print(f"🚢 使用三次样条插值后的平滑路径进行航行: {len(path_coords)} → {len(spline_result)} 点")
+                # 保存样条插值后的路径副本，确保原始路径不会消失
+                self.spline_path = spline_result.copy()
+
+            if len(spline_result) < 2:
+                self.main_window.printf("路径点数量不足，无法开始实时模拟！")
+                return
+
+            # 新增：路径稀疏化处理，减少全局路径点数量
+            from local_planner.algorithms.apf_local_planner import APFLocalPlanner
+            apf_planner = APFLocalPlanner()
+            apf_planner.reset_planner()
+            # 对spline_path进行稀疏化处理，增大距离阈值以获取更少的关键节点
+            sparse_path = apf_planner.discretize_path(spline_result, distance_threshold=250.0)
+            print(f"🎯 使用稀疏化后的路径进行局部规划：{len(spline_result)} → {len(sparse_path)} 点")
+
+            path_for_motion = sparse_path
+
+            # 在规划图层上绘制用于实时航行的优化路径（淡黄色），便于与实时局部路径区分
+            if sparse_path and len(sparse_path) >= 2:
+                light_yellow = (255, 255, 153)
+                # 先清理旧的规划路径显示
+                self.plan_surface.fill(self.back_color)
+                for i in range(len(sparse_path) - 1):
+                    x1, y1 = sparse_path[i]
+                    x2, y2 = sparse_path[i + 1]
+                    pygame.draw.line(self.plan_surface, light_yellow,
+                                     (int(x1), int(y1)), (int(x2), int(y2)), 3)
         else:
-            # 统一路径格式为(x,y)元组列表
-            path_coords = []
-            for point in self.result:
-                if hasattr(point, 'x') and hasattr(point, 'y'):
-                    # 如果点是对象（有x,y属性）
-                    path_coords.append((point.x, point.y))
-                elif isinstance(point, (tuple, list)) and len(point) >= 2:
-                    # 如果点是元组或列表
-                    path_coords.append((point[0], point[1]))
-                else:
-                    # 其他情况，跳过
-                    continue
-
-            # 使用三次样条插值对路径进行平滑处理，确保无人船沿着平滑路径行驶
-            path_optimizer = PathOptimizer()
-            spline_result = path_optimizer.cubic_spline_interpolation(path_coords, num_interpolated_points=100)
-            print(f"🚢 使用三次样条插值后的平滑路径进行航行: {len(path_coords)} → {len(spline_result)} 点")
-
-        if len(spline_result) < 2:
-            self.main_window.printf("路径点数量不足，无法开始实时模拟！")
-            return
+            # 情况二：无全局路径结果，进入“终点直航”模式
+            self.main_window.printf("未检测到全局路径，已切换为以终点为目标的实时航行模式。")
+            # 仅使用终点作为路径，交给 USVMotionSimulator 自动识别无全局路径模式
+            path_for_motion = [self.end_point]
 
         # 调试信息：打印动态障碍物数量
         if hasattr(self, 'dynamic_obstacles'):
@@ -1006,23 +1064,25 @@ class PygameWidget(QWidget):
         else:
             print("⚠️ 未找到motion_simulator，跳过起点碰撞检测")
 
-        # 注意：不同算法的路径方向已在各自算法中处理，无需再反转
-        # 移除无条件的路径反转，避免方向错误
-
-        # 新增：路径稀疏化处理，减少全局路径点数量
-        # 创建APF规划器实例用于路径稀疏化
-        from local_planner.algorithms.apf_local_planner import APFLocalPlanner
-        apf_planner = APFLocalPlanner()
-
-        # 对spline_path进行稀疏化处理，默认距离阈值为50.0
-        sparse_path = apf_planner.discretize_path(spline_result)
-        print(f"🎯 使用稀疏化后的路径进行局部规划：{len(spline_result)} → {len(sparse_path)} 点")
-
+        # 调用实时运动模拟器
         self.motion_simulator.start_journey(
             self.start_point,
             self.end_point,
-            sparse_path  # 使用稀疏化后的路径
+            path_for_motion  # 可能是稀疏化路径，也可能仅包含终点
         )
+
+        # 启动实时航行时，同步最新的快照开关与目录
+        self.snapshot_enabled = getattr(self.main_window, 'snapshot_enabled', False)
+        self.snapshot_dir = getattr(self.main_window, 'snapshot_dir', "")
+        # 重置终点快照标记
+        self.final_snapshot_taken = False
+        # 若勾选了快照且目录有效，则记录开始时间并确保定时器开启
+        if self.snapshot_enabled and self.snapshot_dir:
+            self.snapshot_start_time = time.time()
+            if hasattr(self, 'snapshot_timer') and not self.snapshot_timer.isActive():
+                self.snapshot_timer.start(500)
+        else:
+            self.snapshot_start_time = None
     # A*算法
     def startAstar(self):
         self.result = None
@@ -1535,9 +1595,19 @@ class PygameWidget(QWidget):
 
     def update_dynamic_obstacles(self):
         """
-        更新动态障碍物位置，检测碰撞并处理反弹。
+        更新动态障碍物位置，检测碰撞并处理反弹或消失。
         """
+        # 如果船舶已经发生碰撞，则保持当前动态障碍物状态，不再更新其位置
+        if hasattr(self, 'motion_simulator') and getattr(self.motion_simulator, 'has_collided', False):
+            return
+
+        # 记录需要移除的障碍物
+        obstacles_to_remove = []
+
         for obstacle in self.dynamic_obstacles:
+            # 更新尾迹
+            obstacle.update_trail()
+            
             # 更新位置
             dx, dy = obstacle.direction
             x, y = obstacle.position
@@ -1548,15 +1618,11 @@ class PygameWidget(QWidget):
             dynamic_polygon = Polygon(obstacle.to_polygon())
 
             # 检测与边界碰撞
+            hit_boundary = False
             if new_x - obstacle.size < 0 or new_x + obstacle.size > self.width:
-                obstacle.direction = (-dx, dy)  # 水平方向反弹
-                obstacle.position = (x, y)  # 恢复位置
-                continue
-
+                hit_boundary = True
             if new_y - obstacle.size < 0 or new_y + obstacle.size > self.height:
-                obstacle.direction = (dx, -dy)  # 垂直方向反弹
-                obstacle.position = (x, y)  # 恢复位置
-                continue
+                hit_boundary = True
 
             # 检测与静态障碍物碰撞
             collision = False
@@ -1566,13 +1632,30 @@ class PygameWidget(QWidget):
                     collision = True
                     break
 
-            if collision:
-                # 如果碰撞，反弹方向并恢复到原位置
-                obstacle.direction = (-dx, -dy)
-                obstacle.position = (x, y)
+            if hit_boundary or collision:
+                if obstacle.bounce:
+                    # 反弹模式：恢复原位置并反向
+                    obstacle.position = (x, y)
+                    # 反向运动方向
+                    if hit_boundary:
+                        if new_x - obstacle.size < 0 or new_x + obstacle.size > self.width:
+                            obstacle.direction = (-dx, dy)  # 水平方向反弹
+                        if new_y - obstacle.size < 0 or new_y + obstacle.size > self.height:
+                            obstacle.direction = (dx, -dy)  # 垂直方向反弹
+                    if collision:
+                        obstacle.direction = (-dx, -dy)  # 与静态障碍物碰撞反弹
+                else:
+                    # 消失模式：标记为需要移除
+                    obstacle.should_remove = True
+                    obstacles_to_remove.append(obstacle)
             else:
                 # 如果无碰撞，则保持新位置
                 obstacle.position = (new_x, new_y)
+
+        # 移除标记为消失的障碍物
+        for obstacle in obstacles_to_remove:
+            if obstacle in self.dynamic_obstacles:
+                self.dynamic_obstacles.remove(obstacle)
 
     def draw_dynamic_obstacles(self):
         """
@@ -1584,6 +1667,25 @@ class PygameWidget(QWidget):
 
         # 绘制每个动态障碍物
         for obstacle in self.dynamic_obstacles:
+            # 绘制尾迹
+            if len(obstacle.trail) > 1:
+                # 尾迹颜色：渐变的半透明效果
+                for i in range(len(obstacle.trail) - 1):
+                    alpha = (i + 1) / len(obstacle.trail)  # 渐变透明度
+                    trail_color = (
+                        int(255 * alpha),  # R
+                        int(165 * alpha),  # G  
+                        int(0 * alpha)     # B
+                    )
+                    # 绘制尾迹线段
+                    start_pos = (int(obstacle.trail[i][0]), int(obstacle.trail[i][1]))
+                    end_pos = (int(obstacle.trail[i + 1][0]), int(obstacle.trail[i + 1][1]))
+                    pygame.draw.line(self.dynamic_surface, trail_color, start_pos, end_pos, 2)
+                    
+                    # 绘制尾迹点
+                    pygame.draw.circle(self.dynamic_surface, trail_color, start_pos, 3)
+
+            # 绘制障碍物本体
             x, y = obstacle.position
             if obstacle.shape == "圆形":
                 # 绘制圆形障碍物
@@ -1603,7 +1705,7 @@ class PygameWidget(QWidget):
                 raise ValueError(f"未知动态障碍物形状: {obstacle.shape}")
 
     #创建动态障碍物定义，并加入列表中
-    def create_dynamic_obstacle(self, x, y, shape, direction, speed):
+    def create_dynamic_obstacle(self, x, y, shape, direction, speed, size=20, bounce=True):
         # 创建障碍物图形（可以使用 QLabel 模拟）
         # 定义运动方向（dx, dy）
         direction_map = {"向上": (0, -1), "向下": (0, 1), "向左": (-1, 0), "向右": (1, 0)}
@@ -1613,7 +1715,8 @@ class PygameWidget(QWidget):
             (x, y),
             (dx,dy),  # 水平方向
             speed,
-            20
+            size,  # 使用传入的大小参数
+            bounce  # 反弹控制参数
         ))
         #self.draw_dynamic_obstacles()
 
@@ -1696,20 +1799,38 @@ class PygameWidget(QWidget):
         for obs in obstacles:
             pygame.draw.polygon(self.obs_surface, PygameWidget.OBS_COLOR, obs)
 
-        # # 绘制起始点和终点
+        # 清空point_surface
+        self.point_surface.fill(self.back_color)
+        
+        # 绘制起始点和终点到point_surface上，而不是obs_surface
         if self.start_point:
-            pygame.draw.circle(self.obs_surface, (0, 255, 0), self.start_point, self.obs_radius)
+            pygame.draw.circle(self.point_surface, (0, 255, 0), self.start_point, self.point_radius)
         if self.end_point:
-            pygame.draw.circle(self.obs_surface, (255, 0, 0), self.end_point, self.obs_radius)
+            pygame.draw.circle(self.point_surface, (255, 0, 0), self.end_point, self.point_radius)
+        
+        # 更新界面
+        self.update()
 
 
 
     # 鼠标点击事件处理
     def mousePressEvent(self, event):
+        pos = (event.pos().x(), event.pos().y())
+
+        # 若存在待生成的图形障碍物配置，则优先在点击位置放置图形障碍物
+        if event.button() == Qt.LeftButton and self.pending_graph_shape is not None:
+            shape_index = self.pending_graph_shape
+            size = self.pending_graph_size or 40
+            # 在点击位置生成图形障碍物
+            self.paint_random_one(shape_index, center=pos, size=size)
+            # 使用后清空配置
+            self.pending_graph_shape = None
+            self.pending_graph_size = None
+            self.update()
+            return
 
         if event.button() == Qt.LeftButton:
             self.drawing = True
-            pos = (event.pos().x(), event.pos().y())
             self.last_pos = pos
             print(pos)
             pygame.draw.circle(self.obs_surface, self.obs_color, pos, self.obs_radius)
@@ -1785,6 +1906,134 @@ class PygameWidget(QWidget):
         painter = QPainter(self)
         painter.drawPixmap(0, 0, pixmap)
         painter.end()
+
+    def _maybe_save_snapshot(self):
+        """在满足条件时保存当前画面快照。
+
+        条件：
+        - 主窗口勾选了实时快照（snapshot_enabled=True）
+        - 已设置有效的保存目录（snapshot_dir 非空）
+        - 模拟器存在且当前处于运动状态（motion_simulator.is_moving=True）
+        """
+        # 同步主窗口最新配置（允许途中取消勾选）
+        if hasattr(self, 'main_window'):
+            self.snapshot_enabled = getattr(self.main_window, 'snapshot_enabled', self.snapshot_enabled)
+            self.snapshot_dir = getattr(self.main_window, 'snapshot_dir', self.snapshot_dir)
+
+        # 基本前置条件：未勾选或无目录或无模拟器，则不保存
+        if (not self.snapshot_enabled or
+                not self.snapshot_dir or
+                not hasattr(self, 'motion_simulator') or
+                not self.motion_simulator):
+            return
+
+        ms = self.motion_simulator
+
+        # 初始化开始时间（以防定时器在 start_realtime_simulation 之前被启动）
+        if self.snapshot_start_time is None:
+            self.snapshot_start_time = time.time()
+
+        # 时间上限：超过 10 秒自动停止保存并重置勾选
+        elapsed = time.time() - self.snapshot_start_time
+        if elapsed > 40.0:
+            # 停止快照定时器并关闭主窗口快照开关
+            if hasattr(self, 'snapshot_timer') and self.snapshot_timer.isActive():
+                self.snapshot_timer.stop()
+            if hasattr(self, 'main_window'):
+                if hasattr(self.main_window, 'snapshot_enabled'):
+                    self.main_window.snapshot_enabled = False
+                if hasattr(self.main_window, 'checkbox_snapshot'):
+                    self.main_window.checkbox_snapshot.setChecked(False)
+            # 自身状态重置
+            self.snapshot_enabled = False
+            self.snapshot_start_time = None
+            return
+
+        # 航行过程中，仅在 is_moving=True 时按 0.5s 保存
+        if not getattr(ms, 'is_moving', False):
+            return
+
+        # 确保存储目录存在
+        try:
+            os.makedirs(self.snapshot_dir, exist_ok=True)
+        except Exception:
+            return
+
+        # 组合当前完整画面
+        snapshot_surface = pygame.Surface((self.width, self.height))
+        snapshot_surface.fill(self.back_color)
+        snapshot_surface.blit(self.obs_surface, (0, 0))
+        snapshot_surface.blit(self.dynamic_surface, (0, 0))
+        snapshot_surface.blit(self.point_surface, (0, 0))
+        snapshot_surface.blit(self.plan_surface, (0, 0))
+        if self.grid:
+            snapshot_surface.blit(self.grid_surface, (0, 0))
+        if hasattr(self, 'motion_simulator') and self.motion_simulator:
+            self.motion_simulator.draw_ship(snapshot_surface)
+
+        # 生成文件名：snapshot_0001.png 这样的格式
+        self.snapshot_index += 1
+        filename = f"snapshot_{self.snapshot_index:04d}.png"
+        filepath = os.path.join(self.snapshot_dir, filename)
+
+        try:
+            pygame.image.save(snapshot_surface, filepath)
+        except Exception:
+            # 捕获保存异常，避免影响主循环
+            pass
+
+    def handle_journey_completed_for_snapshot(self):
+        """由 USVMotionSimulator 在航行完成时调用：
+
+        - 如启用快照且未保存过终点快照，则立即保存一张终点画面
+        - 保存后停止快照定时器并关闭主窗口快照勾选
+        """
+        # 若未开启快照或未设置目录，直接返回
+        if (not getattr(self, 'snapshot_enabled', False)) or not self.snapshot_dir:
+            return
+
+        # 已保存过终点快照，则不再重复
+        if self.final_snapshot_taken:
+            return
+
+        self.final_snapshot_taken = True
+
+        # 确保存储目录存在
+        try:
+            os.makedirs(self.snapshot_dir, exist_ok=True)
+        except Exception:
+            return
+
+        # 组合当前完整画面
+        snapshot_surface = pygame.Surface((self.width, self.height))
+        snapshot_surface.fill(self.back_color)
+        snapshot_surface.blit(self.obs_surface, (0, 0))
+        snapshot_surface.blit(self.dynamic_surface, (0, 0))
+        snapshot_surface.blit(self.point_surface, (0, 0))
+        snapshot_surface.blit(self.plan_surface, (0, 0))
+        if self.grid:
+            snapshot_surface.blit(self.grid_surface, (0, 0))
+        if hasattr(self, 'motion_simulator') and self.motion_simulator:
+            self.motion_simulator.draw_ship(snapshot_surface)
+
+        # 生成文件名
+        self.snapshot_index += 1
+        filename = f"snapshot_{self.snapshot_index:04d}_final.png"
+        filepath = os.path.join(self.snapshot_dir, filename)
+
+        try:
+            pygame.image.save(snapshot_surface, filepath)
+        except Exception:
+            pass
+
+        # 保存完终点快照后，停止快照定时器并关闭主窗口勾选
+        if hasattr(self, 'snapshot_timer') and self.snapshot_timer.isActive():
+            self.snapshot_timer.stop()
+        if hasattr(self, 'main_window'):
+            if hasattr(self.main_window, 'snapshot_enabled'):
+                self.main_window.snapshot_enabled = False
+            if hasattr(self.main_window, 'checkbox_snapshot'):
+                self.main_window.checkbox_snapshot.setChecked(False)
 
     # 输入始末点坐标
     def ori_end_input(self, ):  # 输入起始点终点函数
@@ -1868,24 +2117,9 @@ class PygameWidget(QWidget):
         # 创建一个新的surface
         screen = pygame.Surface((self.width, self.height))
 
-        # 设置背景颜色
+        # 设置背景颜色（当前逻辑中不直接使用 screen，仅保留以便后续扩展）
         # screen.fill(PygameWidget.WHITE)
-        #
-        # self.end_point = (x1, y1)
-        # self.win_main.printf("设置终点", x1, y1)
-        # if self.end_point:
-        #     pygame.draw.rect(screen, (255, 0, 0),
-        #                      (self.end_point[0], self.end_point[1], self.cell_size, self.cell_size), 0)
-        #     image = QImage(screen.get_buffer(), self.width, self.height, QImage.Format_RGB32)
-        #
-        #     # 将QImage转换为QPixmap
-        #     pixmap = QPixmap.fromImage(image)
-        #
-        #     # 使用QPainter绘制pixmap
-        #     painter = QPainter(self)
-        #     painter.drawPixmap(0, 0, pixmap)
-        #     painter.end()
-        #     # grid_widget.painting_end(x1,y1)
+
         self.end_point = (x1, y1)
         self.main_window.printf("设置终点", x1, y1)
         if self.end_point:
@@ -1958,17 +2192,25 @@ class PygameWidget(QWidget):
         self.start_point = None  # 清除起点
         self.end_point = None  # 清除终点
         self.obstacles = []  # 清空障碍物列表
-        self.dynamic_obstacles=[]
+        self.dynamic_obstacles = []
         self.dynamic_surface.fill(self.back_color)
         self.obs_surface.fill(self.back_color)
         self.plan_surface.fill(self.back_color)
         self.point_surface.fill(self.back_color)
         self.grid_surface.fill(self.back_color)
 
+        # 清除全局路径规划结果与样条/稀疏路径，防止下次航行沿用旧路径
+        self.result = None
+        self.spline_path = None
+
         # 清除实时航行路径
         if hasattr(self, 'motion_simulator'):
             self.motion_simulator.history_path = []  # 清空历史轨迹
             self.motion_simulator.local_path = []  # 清空局部路径
+            self.motion_simulator.path = []        # 清空用于实时航行的全局路径
+            self.motion_simulator.path_index = 0   # 重置路径索引
+            self.motion_simulator.current_pos = None
+            self.motion_simulator.target_pos = None
             self.motion_simulator.is_moving = False  # 停止运动
             self.motion_simulator.journey_completed = False  # 重置完成状态
             self.motion_simulator.has_collided = False  # 重置碰撞状态
@@ -1994,6 +2236,10 @@ class PygameWidget(QWidget):
         # 清空plan_surface
         self.plan_surface.fill(self.back_color)
 
+        # 重新绘制障碍物
+        for obs in self.obstacles:
+            pygame.draw.polygon(self.obs_surface, self.obs_color, obs)
+
         # 重新绘制起点和终点，确保它们在清空图层后保持正确颜色显示
         if hasattr(self, 'start_point') and self.start_point is not None:
             # 绿色绘制起点
@@ -2005,9 +2251,6 @@ class PygameWidget(QWidget):
             pygame.draw.circle(self.point_surface, (255, 0, 0),
                               (int(self.end_point[0]), int(self.end_point[1])),
                               self.point_radius)
-            pygame.draw.circle(self.point_surface, (0, 255, 0), self.start_point, self.point_radius)
-        if self.end_point:
-            pygame.draw.circle(self.point_surface, (255, 0, 0), self.end_point, self.point_radius)
 
     # 未栅格化地图障碍点获取
     def get_obs_vertices(self):
@@ -2016,16 +2259,41 @@ class PygameWidget(QWidget):
         _, binary = cv2.threshold(capture_gray, 254, 255, cv2.THRESH_BINARY_INV)
         contours, hierarchy = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        # for obs in contours:
-        #     obs = obs.reshape(-1, 2).tolist()
-        #     pygame.draw.polygon(self.obs_surface, PygameWidget.OBS_COLOR, obs)
-
         self.obstacles = []
 
+        # 排除起始点和终点的半径范围
+        excluded_points = []
+        if self.start_point:
+            excluded_points.append((self.start_point, self.point_radius + 2))
+        if self.end_point:
+            excluded_points.append((self.end_point, self.point_radius + 2))
+
         for obs in contours:
+            # 检查轮廓是否过小（可能是起始点或终点）
+            area = cv2.contourArea(obs)
+            if area < 100:  # 过小的轮廓可能是起始点或终点
+                # 检查轮廓中心点是否在排除点范围内
+                M = cv2.moments(obs)
+                if M['m00'] > 0:
+                    cx = int(M['m10']/M['m00'])
+                    cy = int(M['m01']/M['m00'])
+                    is_excluded = False
+                    for (point, radius) in excluded_points:
+                        distance = math.sqrt((cx - point[0])**2 + (cy - point[1])**2)
+                        if distance <= radius:
+                            is_excluded = True
+                            break
+                    if is_excluded:
+                        continue
+            
             obstacle = obs.squeeze().tolist()
-            pygame.draw.polygon(self.obs_surface, self.obs_color, obstacle)
-            self.obstacles.append(obstacle)
+            # 确保obstacle是列表格式且不为空
+            if isinstance(obstacle, list) and len(obstacle) > 0:
+                # 确保是二维列表格式
+                if isinstance(obstacle[0], int):  # 如果是一维列表，转为二维
+                    obstacle = [obstacle]
+                pygame.draw.polygon(self.obs_surface, self.obs_color, obstacle)
+                self.obstacles.append(obstacle)
 
         # print(self.obstacles)
 
@@ -2039,47 +2307,54 @@ class PygameWidget(QWidget):
 
         # return contours
 
-    # 随机图形障碍物
-    def paint_random_one(self, current_index):
-        if current_index == 1:
-            pygame.draw.rect(self.obs_surface, BLACK, (100, 100, self.rect_size, self.rect_size))
-        elif current_index == 2:
-            pygame.draw.circle(self.obs_surface, BLACK, self.circle_center, self.circle_radius, 0)
-        elif current_index == 3:
-            # 三角形
-            height = self.tri_size * math.sqrt(3) / 2
-            # 计算顶点坐标
-            self.tri_vertices = [
-                (self.tri_center[0], self.tri_center[1] - self.tri_size / 2),  # 上方顶点
-                (self.tri_center[0] - self.tri_size / 2, self.tri_center[1] + height),  # 左下顶点
-                (self.tri_center[0] + self.tri_size / 2, self.tri_center[1] + height)  # 右下顶点
+    # 图形障碍物（单个，可指定中心和大小）
+    def paint_random_one(self, current_index, center, size):
+        cx, cy = center
+        if current_index == 1:  # 矩形
+            half = size // 2
+            rect = pygame.Rect(cx - half, cy - half, size, size)
+            pygame.draw.rect(self.obs_surface, BLACK, rect)
+        elif current_index == 2:  # 圆形
+            pygame.draw.circle(self.obs_surface, BLACK, (cx, cy), size, 0)
+        elif current_index == 3:  # 三角形
+            height = size * math.sqrt(3) / 2
+            tri_vertices = [
+                (cx, cy - size / 2),
+                (cx - size / 2, cy + height),
+                (cx + size / 2, cy + height)
             ]
-            pygame.draw.polygon(self.obs_surface, BLACK, self.tri_vertices)
-        elif current_index == 4:
-            # 椭圆
+            pygame.draw.polygon(self.obs_surface, BLACK, tri_vertices)
+        elif current_index == 4:  # 椭圆
+            points = []
+            a = size
+            b = size * 0.6
             for i in range(360):
                 angle_rad = math.radians(i)
-                x = self.elli_center[0] + self.elli_width / 2 * math.cos(angle_rad)
-                y = self.elli_center[0] + self.elli_height / 2 * math.sin(angle_rad)
-                self.elli_points.append((int(x), int(y)))
-                # 绘制多边形
-            pygame.draw.polygon(self.obs_surface, BLACK, self.elli_points)  # 随机多边形障碍物
-        elif current_index == 5:
-            # 绘制菱形
-            half_size = self.dia_size // 2
-            a = math.sqrt(2) * half_size
-            self.dia_vertices = [(self.dia_center[0] - half_size, self.dia_center[1] - half_size),
-                                 (self.dia_center[0] + half_size, self.dia_center[1] - half_size),
-                                 (self.dia_center[0] + a, self.dia_center[1] + a),
-                                 (self.dia_center[0] - a, self.dia_center[1] + a)]
-            pygame.draw.polygon(self.obs_surface, BLACK, self.dia_vertices)
-        elif current_index == 6:
-            # 绘制五角星
-            for i in range(5):
-                x = self.star_center[0] + self.star_outer_radius * math.cos(i * self.angle)
-                y = self.star_center[1] + self.star_outer_radius * math.sin(i * self.angle)
-                self.star_points.append((int(x), int(y)))
-            pygame.draw.polygon(self.obs_surface, BLACK, self.star_points)
+                x = cx + a * math.cos(angle_rad)
+                y = cy + b * math.sin(angle_rad)
+                points.append((int(x), int(y)))
+            if len(points) >= 3:
+                pygame.draw.polygon(self.obs_surface, BLACK, points)
+        elif current_index == 5:  # 菱形
+            half = size // 2
+            dia_vertices = [
+                (cx, cy - half),
+                (cx + half, cy),
+                (cx, cy + half),
+                (cx - half, cy)
+            ]
+            pygame.draw.polygon(self.obs_surface, BLACK, dia_vertices)
+        elif current_index == 6:  # 五角星
+            points = []
+            outer_r = size
+            inner_r = size * 0.4
+            for i in range(10):
+                r = outer_r if i % 2 == 0 else inner_r
+                angle_rad = math.radians(90 + i * 36)
+                x = cx + r * math.cos(angle_rad)
+                y = cy - r * math.sin(angle_rad)
+                points.append((int(x), int(y)))
+            pygame.draw.polygon(self.obs_surface, BLACK, points)
         self.get_obs_vertices()
 
     #  随机多边形障碍物

@@ -5,19 +5,39 @@ from shapely import Point
 
 
 class DynamicObstacle:
-    def __init__(self, shape, position, direction, speed, size):
+    def __init__(self, shape, position, direction, speed, size, bounce=True):
         """
         :param shape: str, 形状类型（如 '圆形', '正方形', '椭圆' 等）
         :param position: tuple(float, float), 障碍物中心位置 (x, y)
         :param direction: tuple(float, float), 方向向量 (dx, dy)
         :param speed: float, 运动速度
         :param size: float, 障碍物大小（半径或边长）
+        :param bounce: bool, 是否在边界反弹（True为反弹，False为消失）
         """
         self.shape = shape
         self.position = position
         self.direction = direction
         self.speed = speed
         self.size = size
+        self.bounce = bounce
+        
+        # 尾迹轨迹：存储历史位置点
+        self.trail = []
+        self.max_trail_length = 30  # 最大尾迹长度
+        self.trail_counter = 0  # 用于控制尾迹记录频率
+        
+        # 标记是否应该被移除（用于不反弹的情况）
+        self.should_remove = False
+
+    def update_trail(self):
+        """更新尾迹轨迹"""
+        # 每隔几帧记录一次位置，避免尾迹过密
+        self.trail_counter += 1
+        if self.trail_counter % 2 == 0:  # 每2帧记录一次
+            self.trail.append(self.position)
+            # 限制尾迹长度
+            if len(self.trail) > self.max_trail_length:
+                self.trail.pop(0)
 
     def predict_future_position(self, time_delta):
         """根据速度和时间预测未来的位置"""

@@ -19,7 +19,7 @@ class Ui_MainWindow(object):
     def DynamicObstaclesUI(self, MainWindow, grid_widget):
         self.loginWindow_new = None
         MainWindow.setObjectName("MainWindow")
-        MainWindow.setFixedSize(500, 300)  # 窗口大小锁定
+        MainWindow.setFixedSize(500, 400)  # 增加窗口高度以容纳大小控件
         # 障碍物形状
         label_shape = QLabel("障碍物形状:", MainWindow)
         label_shape.setGeometry(60, 30, 100, 30)
@@ -62,13 +62,37 @@ class Ui_MainWindow(object):
         label_speed_value.setGeometry(370, 130, 40, 30)
         slider_speed.valueChanged.connect(lambda value: label_speed_value.setText(str(value)))
 
+        # 动态障碍物大小
+        label_size = QLabel("障碍物大小:", MainWindow)
+        label_size.setGeometry(60, 180, 100, 30)
+        from PyQt5.QtWidgets import QSpinBox
+        spin_size = QSpinBox(MainWindow)
+        spin_size.setGeometry(160, 180, 120, 30)
+        spin_size.setRange(5, 200)
+        spin_size.setValue(20)  # 默认大小为20，与之前的默认值保持一致
+        label_size_value = QLabel("20", MainWindow)
+        label_size_value.setGeometry(290, 180, 40, 30)
+        spin_size.valueChanged.connect(lambda value: label_size_value.setText(str(value)))
+
+        # 边界行为选择
+        label_boundary = QLabel("边界行为:", MainWindow)
+        label_boundary.setGeometry(60, 230, 100, 30)
+        boundary_group = QButtonGroup(MainWindow)
+        radio_bounce = QRadioButton("反弹", MainWindow)
+        radio_bounce.setGeometry(160, 230, 60, 30)
+        radio_bounce.setChecked(True)  # 默认选择反弹
+        radio_disappear = QRadioButton("消失", MainWindow)
+        radio_disappear.setGeometry(230, 230, 60, 30)
+        boundary_group.addButton(radio_bounce)
+        boundary_group.addButton(radio_disappear)
+
         # 按钮：选择动态障碍物位置
         button_select_position = QPushButton("选择动态障碍物位置", MainWindow)
-        button_select_position.setGeometry(180, 200, 150, 40)
+        button_select_position.setGeometry(180, 300, 150, 40)
         button_select_position.clicked.connect(
-            lambda: self.select_obstacle_position(MainWindow, grid_widget, shape_group, direction_group, slider_speed))
+            lambda: self.select_obstacle_position(MainWindow, grid_widget, shape_group, direction_group, slider_speed, spin_size, boundary_group))
 
-    def select_obstacle_position(self, settings_window, grid_widget, shape_group, direction_group, slider_speed):
+    def select_obstacle_position(self, settings_window, grid_widget, shape_group, direction_group, slider_speed, spin_size, boundary_group):
         # 隐藏设置窗口
         settings_window.hide()
 
@@ -86,20 +110,23 @@ class Ui_MainWindow(object):
             label_notice.hide()
             grid_widget.mousePressEvent = None  # 取消绑定事件
 
-            # 获取形状、方向、速度
+            # 获取形状、方向、速度、大小、反弹设置
             shape_button = shape_group.checkedButton()
             direction_button = direction_group.checkedButton()
             speed = slider_speed.value()
+            size = spin_size.value()
+            boundary_button = boundary_group.checkedButton()
 
-            if not shape_button or not direction_button:
-                QMessageBox.warning(grid_widget, "错误", "请设置障碍物的形状和运动方向")
+            if not shape_button or not direction_button or not boundary_button:
+                QMessageBox.warning(grid_widget, "错误", "请设置障碍物的形状、运动方向和边界行为")
                 return
 
             shape = shape_button.text()
             direction = direction_button.text()
+            bounce = (boundary_button.text() == "反弹")  # 判断是否选择反弹
 
             # 创建动态障碍物
-            grid_widget.create_dynamic_obstacle(x, y, shape, direction, speed)
+            grid_widget.create_dynamic_obstacle(x, y, shape, direction, speed, size, bounce)
 
         grid_widget.mousePressEvent = on_grid_click
 
@@ -596,7 +623,7 @@ class Ui_MainWindow(object):
     def graph_ob(self, MainWindow, grid_widget):
         self.loginWindow_new = None
         MainWindow.setObjectName("图形障碍物")
-        MainWindow.setFixedSize(300, 120)
+        MainWindow.setFixedSize(320, 160)
         # 创建起点标签
         self.label_graph = QLabel("障碍物类型:", MainWindow)
         self.label_graph.setGeometry(60, 20, 80, 30)  # 设置标签位置和大小
@@ -609,17 +636,30 @@ class Ui_MainWindow(object):
         self.combo_box.addItem("椭圆形")
         self.combo_box.addItem("菱形")
         self.combo_box.addItem("五角形")
+        # 大小输入
+        self.label_size = QLabel("大小:", MainWindow)
+        self.label_size.setGeometry(60, 60, 80, 30)
+        from PyQt5.QtWidgets import QSpinBox
+        self.spin_size = QSpinBox(MainWindow)
+        self.spin_size.setGeometry(130, 60, 120, 30)
+        self.spin_size.setRange(5, 200)
+        self.spin_size.setValue(40)
         # 创建生成障碍物按钮
         self.button_modify = QPushButton("生成", MainWindow)
-        self.button_modify.setGeometry(90, 60, 120, 30)  # 设置按钮位置和大小
+        self.button_modify.setGeometry(100, 100, 120, 30)  # 设置按钮位置和大小
         label_notice = QLabel("", MainWindow)
-        label_notice.setGeometry(90, 90, 150, 30)  # 设置标签位置和大小
+        label_notice.setGeometry(90, 130, 200, 30)  # 设置标签位置和大小
 
         # 按钮点击事件处理函数
         def on_button_click():
             selected_index = self.combo_box.currentIndex()
-            grid_widget.paint_random_one(selected_index+1)
-            label_notice.setText("障碍物生成成功！")
+            size = self.spin_size.value()
+            # 在 PygameWidget 上记录待生成图形障碍物的形状和大小，由下一次地图点击确定位置
+            grid_widget.pending_graph_shape = selected_index + 1
+            grid_widget.pending_graph_size = size
+            label_notice.setText("请在地图上点击放置障碍物...")
+            # 立即关闭窗口，回到主界面进行点击放置
+            MainWindow.close()
         # 连接按钮的点击信号到处理函数
         self.button_modify.clicked.connect(on_button_click)
 
@@ -787,6 +827,9 @@ class Ui_MainWindow(object):
 
     def setupUi(self, MainWindow, grid_widget):
         self.loginWindow_new = None
+        # 实时快照配置（供 PygameWidget 使用）
+        self.snapshot_enabled = False
+        self.snapshot_dir = ""
         MainWindow.setObjectName("MainWindow")
         MainWindow.resize(1100, 850)
         icon = QtGui.QIcon()
@@ -960,6 +1003,29 @@ class Ui_MainWindow(object):
         self.combo_local_algorithm.setCurrentIndex(0)  # 默认选择无局部算法
         # self.pushButton_dynamic_ob.setStyleSheet("background-color: yellow;")  # 设置背景色以便观察
         # self.pushButton_dynamic_ob.setVisible(True)  # 确保按钮可见
+
+        # 新增：实时快照开关与目录选择
+        self.checkbox_snapshot = QCheckBox(self.centralwidget)
+        self.checkbox_snapshot.setGeometry(QtCore.QRect(820, 480, 120, 25))
+        self.checkbox_snapshot.setText("实时快照(0.5s)")
+
+        self.btn_snapshot_dir = QPushButton(self.centralwidget)
+        self.btn_snapshot_dir.setGeometry(QtCore.QRect(920, 480, 120, 25))
+        self.btn_snapshot_dir.setText("选择快照目录")
+
+        def on_snapshot_toggled(state):
+            self.snapshot_enabled = (state == Qt.Checked)
+
+        def on_choose_snapshot_dir():
+            directory = QFileDialog.getExistingDirectory(MainWindow, "选择快照保存文件夹", "")
+            if directory:
+                self.snapshot_dir = directory
+                # 在结果输出中提示当前快照目录
+                if hasattr(self, "printf"):
+                    self.printf(f"快照保存目录: {directory}")
+
+        self.checkbox_snapshot.stateChanged.connect(on_snapshot_toggled)
+        self.btn_snapshot_dir.clicked.connect(on_choose_snapshot_dir)
 
         # 下载地图模板
         self.actionArithmeticList = QtWidgets.QAction(MainWindow)

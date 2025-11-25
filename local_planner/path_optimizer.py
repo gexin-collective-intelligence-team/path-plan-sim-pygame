@@ -163,30 +163,64 @@ class PathOptimizer:
         
         return key_points
     
-    def _validate_segments(self, path: List[Tuple[float, float]], 
-                          obstacles: List) -> List[Tuple[float, float]]:
-        """验证每个路径段是否可行"""
-        if len(path) < 2:
-            return path
-        
-        validated = [path[0]]
-        
-        for i in range(1, len(path)):
-            start = validated[-1]
-            end = path[i]
+    def _validate_segments(self, key_points: List[Tuple[float, float]], obstacles: List) -> List[Tuple[float, float]]:
+        """
+        验证路径段之间的碰撞情况，并在必要时添加补充点
+        """
+        if not obstacles or len(key_points) < 2:
+            return key_points
+
+        validated_path = [key_points[0]]
+        for i in range(1, len(key_points)):
+            current_point = validated_path[-1]
+            next_point = key_points[i]
             
-            # 检查路径段是否与障碍物碰撞
-            if not self._line_collision(start, end, obstacles):
-                validated.append(end)
+            # 检查从当前有效点到下一个关键点的路径是否有碰撞
+            if not self._line_collision(current_point, next_point, obstacles):
+                # 如果无碰撞，直接添加该点
+                validated_path.append(next_point)
             else:
-                # 如果直接路径不可行，保留中间点
+                # 如果碰撞，使用更简单可靠的方法：逐个检查中间点
+                # 从当前有效点到下一个点之间，尝试添加中间点
+                # 首先记录当前有效点的位置
+                current_idx = -1
+                for j, p in enumerate(key_points):
+                    if abs(p[0] - current_point[0]) < 1e-6 and abs(p[1] - current_point[1]) < 1e-6:
+                        current_idx = j
+                        break
                 
-                mid_idx = (validated.index(validated[-1]) + path.index(end)) // 2
-                if mid_idx < len(path):
-                    validated.append(path[mid_idx])
-                    validated.append(end)
+                # 逐个检查中间点
+                safe_point_found = False
+                for j in range(current_idx + 1, i):
+                    mid_point = key_points[j]
+                    if not self._line_collision(current_point, mid_point, obstacles):
+                        # 找到一个安全的中间点
+                        validated_path.append(mid_point)
+                        safe_point_found = True
+                        # 递归检查从中间点到目标点
+                        if not self._line_collision(mid_point, next_point, obstacles):
+                            validated_path.append(next_point)
+                        else:
+                            # 如果从中间点到目标点仍有碰撞，继续添加更多中间点
+                            for k in range(j + 1, i + 1):
+                                if not self._line_collision(validated_path[-1], key_points[k], obstacles):
+                                    validated_path.append(key_points[k])
+                        break
+                
+                # 如果没有找到安全的中间点，仍然添加目标点（可能需要进一步处理）
+                if not safe_point_found and validated_path[-1] != next_point:
+                    validated_path.append(next_point)
         
-        return validated
+        return validated_path
+    
+    def _find_point_in_path(self, point: Tuple[float, float], path: List[Tuple[float, float]]) -> int:
+        """
+        在路径中查找指定点的索引（考虑浮点数精度）
+        """
+        for i, p in enumerate(path):
+            if abs(p[0] - point[0]) < 1e-6 and abs(p[1] - point[1]) < 1e-6:
+                return i
+        return -1
     
     def normalize(self, dx, dy):
         """将向量归一化"""
