@@ -52,8 +52,9 @@ def load_demo(file_name):
             direction = tuple(properties.get('direction', (1, 0)))  # 默认方向为 (1, 0)
             speed = properties.get('speed', 1.0)  # 默认速度为 1.0
             size = properties.get('size', 20.0)  # 默认大小为 5.0
+            bounce = properties.get('bounce', True)  # 读取反弹属性，默认为True
 
-            dynamic_obstacle = DynamicObstacle(shape, position, direction, speed, size)
+            dynamic_obstacle = DynamicObstacle(shape, position, direction, speed, size, bounce)
             dynamic_obstacles.append(dynamic_obstacle)
     # 尝试从不同的键中获取路径数据，以兼容新旧格式
     time = geojson_obj.get('time')
@@ -111,8 +112,9 @@ def load_look(file_name):
             direction = tuple(properties.get('direction', (1, 0)))  # 默认方向为 (1, 0)
             speed = properties.get('speed', 1.0)  # 默认速度为 1.0
             size = properties.get('size', 20.0)  # 默认大小为 5.0
+            bounce = properties.get('bounce', True)  # 读取反弹属性，默认为True
 
-            dynamic_obstacle = DynamicObstacle(shape, position, direction, speed, size)
+            dynamic_obstacle = DynamicObstacle(shape, position, direction, speed, size, bounce)
             dynamic_obstacles.append(dynamic_obstacle)
 
     # 尝试从不同的键中获取路径数据，以兼容新旧格式

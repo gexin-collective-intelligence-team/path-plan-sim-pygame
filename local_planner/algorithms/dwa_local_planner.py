@@ -15,7 +15,7 @@ class DWALocalPlanner(BaseLocalPlanner):
     def __init__(self):
         super().__init__("DWA")
         self.config = {
-            'max_speed': 2.0,
+            'max_speed': 5.0,
             'max_rotation_speed': 1.0,
             'max_acceleration': 0.5,
             'max_rotation_acceleration': 1.0,

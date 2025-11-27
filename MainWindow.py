@@ -830,6 +830,8 @@ class Ui_MainWindow(object):
         # 实时快照配置（供 PygameWidget 使用）
         self.snapshot_enabled = False
         self.snapshot_dir = ""
+        # 速度信息保存配置
+        self.save_speed_enabled = True
         MainWindow.setObjectName("MainWindow")
         MainWindow.resize(1100, 850)
         icon = QtGui.QIcon()
@@ -1013,6 +1015,12 @@ class Ui_MainWindow(object):
         self.btn_snapshot_dir.setGeometry(QtCore.QRect(920, 480, 120, 25))
         self.btn_snapshot_dir.setText("选择快照目录")
 
+        # 新增：控制是否保存速度信息的复选框
+        self.checkbox_save_speed = QCheckBox(self.centralwidget)
+        self.checkbox_save_speed.setGeometry(QtCore.QRect(820, 510, 120, 25))
+        self.checkbox_save_speed.setText("保存速度信息")
+        self.checkbox_save_speed.setChecked(True)  # 默认保存速度信息
+
         def on_snapshot_toggled(state):
             self.snapshot_enabled = (state == Qt.Checked)
 
@@ -1024,8 +1032,16 @@ class Ui_MainWindow(object):
                 if hasattr(self, "printf"):
                     self.printf(f"快照保存目录: {directory}")
 
+        def on_save_speed_toggled(state):
+            # 保存速度信息设置到属性中，供其他组件使用
+            self.save_speed_enabled = (state == Qt.Checked)
+            if hasattr(self, "printf"):
+                status = "启用" if state == Qt.Checked else "禁用"
+                self.printf(f"速度信息保存已{status}")
+
         self.checkbox_snapshot.stateChanged.connect(on_snapshot_toggled)
         self.btn_snapshot_dir.clicked.connect(on_choose_snapshot_dir)
+        self.checkbox_save_speed.stateChanged.connect(on_save_speed_toggled)
 
         # 下载地图模板
         self.actionArithmeticList = QtWidgets.QAction(MainWindow)

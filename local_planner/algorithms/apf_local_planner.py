@@ -25,32 +25,24 @@ class APFLocalPlanner(BaseLocalPlanner):
         # 默认配置
         self.config = {
             # 引力参数
-            'attractive_gain': 6.0,        # 引力增益系数（略增，保持目标导向性）
+            'attractive_gain': 3.0,        # 引力增益系数
             'min_distance': 5.0,           # 到达目标的最小距离阈值
             
-            # 斥力参数 - 扩大避障范围
-            'repulsive_gain': 1200.0,      # 斥力增益系数（增强避障力度）
-            'static_safety_distance': 40.0, # 静态障碍物安全距离（从30增加到40）
-            'dynamic_safety_distance': 80.0, # 动态障碍物安全距离（从60增加到80）
-            'static_influence_distance': 90.0, # 静态障碍物影响距离（从70增加到90）
-            'dynamic_influence_distance': 250.0, # 动态障碍物影响距离（从200增加到250）
-            'prediction_time': 2.5,        # 动态障碍物基础预测时间（从2.0增加到2.5）
-            'threat_distance_weight': 2.0, # 距离权重
-            'threat_speed_weight': 1.5,    # 速度权重
-            'threat_direction_weight': 0.5, # 方向权重
-            'threat_size_weight': 0.6,      # 尺寸权重
-            'threat_threshold': 0.15,       # 威胁阈值（从0.12增加到0.15，更早触发避障）
-            'threat_gain_scale': 3.5,       # 高威胁时增强斥力的比例（从3.0增加到3.5）
-            'threat_range_scale': 1.8,      # 高威胁时扩大作用范围的比例（从1.5增加到1.8）
-            'braking_distance_base': 25.0,  # 基础制动距离（从20增加到25）
-            'braking_distance_coeff': 10.0, # 与速度相关的制动距离系数（从8增加到10）
+            # 斥力参数
+            'repulsive_gain': 3000.0,      # 斥力增益系数（进一步增强）
+            'static_safety_distance': 30.0, # 静态障碍物安全距离
+            'dynamic_safety_distance': 25.0, # 动态障碍物安全距离（进一步缩短）
+            'static_influence_distance': 100.0, # 静态障碍物影响距离
+            'dynamic_influence_distance': 200.0, # 动态障碍物影响距离（大幅扩大）
+            'prediction_time': 1.0,        # 动态障碍物预测时间（缩短为1秒）
             
-            # 移动参数 - 提高速度和步长
-            'max_step': 15.0,              # 最大步长（从10增加到15，提高移动速度）
-            'max_linear_speed': 35.0,      # 物理最大速度上限（从20提高到35）
-            'max_linear_acc': 12.0,        # 物理最大加速度（从8增加到12）
-            'max_angular_velocity': np.radians(25.0),  # 每步最大角速度（从18°增加到25°）
-            'max_angular_acceleration': np.radians(45.0),  # 每步最大角加速度（从30°增加到45°）
+            # 威胁权重 - 调整为更合理的分配
+            'threat_distance_weight': 5.0,  # 距离权重（增强）
+            'threat_speed_weight': 3.0,     # 速度权重（增强）
+            'threat_direction_weight': 4.0, # 方向权重（增强）
+            
+            # 移动参数
+            'max_step': 30.0,              # 最大步长（增加以提高USV速度）
             
             # 振荡检测参数
             'oscillation_threshold': 3,    # 检测振荡的历史步数
@@ -70,13 +62,6 @@ class APFLocalPlanner(BaseLocalPlanner):
         self.temp_goal = None
         self.temp_goal_count = 0
         self.max_temp_goal_steps = 10  # 临时目标点最大使用步数
-        self.prev_velocity = np.zeros(2)
-        self.prev_heading = np.array([1.0, 0.0])
-        self.prev_angle_change = 0.0
-
-        # 调试/分析日志：记录每一步的威胁指数和最近障碍物距离
-        # 每个元素是一个 dict，包含 step, pos, min_dist, static_threat, dynamic_threat, total_threat
-        self.debug_logs = []
     def reset_planner(self):
         """手动重置规划器状态，确保到达目标点后立即重置所有相关参数"""
         # 直接设置属性而非删除，确保一致的初始化状态
@@ -86,102 +71,87 @@ class APFLocalPlanner(BaseLocalPlanner):
         self.stuck_counter = 0
         self.last_distance_to_target = float('inf')
         self.goal_reached = False  # 明确设置为False，确保重新开始规划
-        self.goal_threshold = self.config.get('min_distance', 5.0)  # 初始化goal_threshold
-        self.max_stuck_steps = 10  # 初始化max_stuck_steps
         self.history_positions = []  # 清空历史位置
         self.use_temp_goal = False
         self.temp_goal = None
         self.temp_goal_count = 0
-        self.prev_velocity = np.zeros(2)
-        self.prev_heading = np.array([1.0, 0.0])
-        self.prev_angle_change = 0.0
-        print("♻️ APF 规划器状态已完全重置，可重新开始路径规划。")
+        self._goal_reached_logged = False  # 重置日志标志，允许下次到达时再次打印
+        print("APF 规划器状态已完全重置，可重新开始路径规划。")
     def plan(self, current_pos, target_pos, static_obstacles, dynamic_obstacles, velocity=None, global_path=None):
         """
         改进版APF路径规划（增强版）
-        ✅ 保留振荡检测与临时目标点机制
-        ✅ 新增目标点可达性检测与自动跳过机制
-        ✅ 添加goal_reached标志，到达目标点后立即停止计算并保持在目标位置
+        保留振荡检测与临时目标点机制
+        新增目标点可达性检测与自动跳过机制
         """
 
         # ---------- 基本初始化 ----------
         current_pos = np.array(current_pos)
         target_pos = np.array(target_pos)
         
-        # 检查是否已到达目标点，如果是则直接返回目标点，不再进行任何计算
+        # 检查是否已到达目标点，如果是则直接返回当前位置，不再进行任何计算
         if hasattr(self, "goal_reached") and self.goal_reached:
-            # 如果传入非空全局路径，返回最后一个目标点；否则返回当前目标点
-            if global_path is not None and len(global_path) > 0:
-                final_target = np.array(global_path[-1])
-                return final_target.copy()
-            # 当 global_path 为 None 或空列表时，直接以传入的 target_pos 作为终点
-            return target_pos.copy()  # 返回目标点的副本，避免引用问题
+            # 只在第一次到达目标点时打印日志，避免重复打印
+            if not getattr(self, "_goal_reached_logged", False):
+                print("已到达目标点，保持在目标位置，不进行任何计算。")
+                self._goal_reached_logged = True
+            return current_pos.copy()  # 返回当前位置的副本，确保保持在原地
         
-        # ✅ 仅首次运行时初始化，或确保关键属性存在
-        if not hasattr(self, "is_initialized") or not self.is_initialized:
+        # 初始化或在 reset 后重新初始化
+        if not getattr(self, "is_initialized", False):
             self.current_target_idx = 0
             self.last_distance_to_target = float('inf')
             self.stuck_counter = 0
             self.max_stuck_steps = 10       # 判定阻挡的连续步数
-            self.goal_threshold = self.config.get('min_distance', 5.0)
+            self.goal_threshold = self.config.get('min_distance', 1.0)
             self.goal_reached = False  # 初始化目标到达标志
             self.is_initialized = True
-            print("🧭 规划器状态已初始化。")
-        
-        # 安全检查：确保goal_threshold存在（防止某些边缘情况）
-        if not hasattr(self, 'goal_threshold'):
-            self.goal_threshold = self.config.get('min_distance', 5.0)
+            print("规划器状态已初始化。")
+            print("规划器状态已初始化。")
 
-        # 若传入非空全局路径，则根据索引更新目标点，并跳过被障碍物覆盖或明显不可达的点
-        if global_path is not None and len(global_path) > 0:
-            # 全局路径模式下使用更大的到达阈值
-            global_min_distance = 12.0  # 全局路径下的最小距离阈值
-            local_min_distance = self.config.get('min_distance', 5.0)  # 单目标模式的最小距离阈值
-            
-            # 动态调整goal_threshold
-            self.goal_threshold = global_min_distance if len(global_path) > 2 else local_min_distance
-            
-            while True:
-                if self.current_target_idx >= len(global_path):
-                    print("✅ 所有目标点已到达或被跳过，规划结束。")
-                    self.goal_reached = True
-                    return current_pos
-                candidate_target = np.array(global_path[self.current_target_idx])
-                if not self._is_target_blocked(current_pos, candidate_target, static_obstacles, dynamic_obstacles):
-                    target_pos = candidate_target
-                    break
-                print(f"⚠️ 全局路径点 {self.current_target_idx} 被障碍物覆盖或不可达，自动跳过。")
+        # 若传入全局路径，则根据索引更新目标点（至少需要 2 个点才视为全局路径）
+        multi_point_path = global_path is not None and len(global_path) > 1
+        if multi_point_path:
+            if self.current_target_idx >= len(global_path):
+                print("所有目标点已到达或被跳过，规划结束。")
+                return current_pos
+            target_pos = np.array(global_path[self.current_target_idx])
+
+            # 仅在目标点被障碍物覆盖或穿透时才跳过，避免误报
+            if self._is_target_blocked(target_pos, static_obstacles, dynamic_obstacles):
+                print(f"当前目标点 {self.current_target_idx} 被障碍物覆盖，立即跳过。")
                 self.current_target_idx += 1
+                if self.current_target_idx < len(global_path):
+                    return self.plan(
+                        current_pos,
+                        np.array(global_path[self.current_target_idx]),
+                        static_obstacles,
+                        dynamic_obstacles,
+                        velocity,
+                        global_path
+                    )
+                print("所有目标点均无法通过直线路径到达，规划终止。")
+                self.goal_reached = True
+                return target_pos.copy()
 
         # ---------- 到目标的距离 ----------
         distance_to_target = np.linalg.norm(target_pos - current_pos)
 
-        # ---------- 特殊策略：优先右侧绕行大静态障碍物（作为临时目标注入） ----------
-        # 当当前点到目标点的直线会穿过某个静态障碍物，且距离该障碍物中心较近时，
-        # 计算一个“右侧切向点”，但不直接作为下一步位置，而是作为 temp_goal，
-        # 交给原有的临时目标机制和运动学约束去平滑逼近。
-        tangent_pos = self._try_tangent_around_static_obstacle(current_pos, target_pos, static_obstacles)
-        if tangent_pos is not None and not self.use_temp_goal:
-            self.use_temp_goal = True
-            self.temp_goal = np.array(tangent_pos, dtype=float)
-            self.temp_goal_count = 0
-
         # ---------- 到达检测 ----------
         if distance_to_target < self.goal_threshold:
-            print(f"🎯 到达目标点 {self.current_target_idx}，切换下一个。")
-            if global_path is not None and len(global_path) > 0:
+            print(f"到达目标点 {self.current_target_idx}，切换下一个。")
+            if multi_point_path:
                 self.current_target_idx += 1
                 if self.current_target_idx < len(global_path):
                     # 切换下一个目标点继续规划
                     return self.plan(current_pos, global_path[self.current_target_idx],
                                     static_obstacles, dynamic_obstacles, velocity, global_path)
                 else:
-                    print("✅ 最终目标点已到达，路径规划完成，立即设置到达标志。")
+                    print("最终目标点已到达，路径规划完成，立即设置到达标志。")
                     self.goal_reached = True  # 设置目标到达标志
                     return target_pos.copy()  # 返回目标点的副本，确保精确到达
             else:
                 # 无全局路径输入时直接停止
-                print("✅ 目标点已到达，路径规划完成，立即设置到达标志。")
+                print("目标点已到达，路径规划完成，立即设置到达标志。")
                 self.goal_reached = True  # 设置目标到达标志
                 return target_pos.copy()  # 返回目标点的副本，确保精确到达
 
@@ -207,23 +177,40 @@ class APFLocalPlanner(BaseLocalPlanner):
 
         # ---------- 计算合力 ----------
         attractive_force = self._calculate_attractive_force(current_pos, current_goal)
-        current_velocity = np.array(velocity) if velocity is not None else np.zeros(2)
-        repulsive_force, max_static_threat, max_dynamic_threat, min_obstacle_distance = self._calculate_repulsive_force(
-            current_pos,
-            static_obstacles,
-            dynamic_obstacles,
-            current_velocity
-        )
         
-        # 全局路径模式下增强引力，减少过度避障导致的减速
-        if global_path is not None and len(global_path) > 2:
-            # 在有全局路径时，适当增强引力，保持前进动力
-            attractive_force *= 1.3  # 增强30%的引力
-            # 如果威胁不大，适当减弱斥力，避免过度减速
-            if max(max_static_threat, max_dynamic_threat) < 0.3:
-                repulsive_force *= 0.7  # 减弱30%的斥力
+        # 使用新的分离式斥力计算
+        static_repulsive = self._calculate_static_repulsion(current_pos, static_obstacles)
+        dynamic_repulsive = self._calculate_dynamic_repulsion(current_pos, dynamic_obstacles)
+        repulsive_force = static_repulsive + dynamic_repulsive
         
         total_force = attractive_force + repulsive_force
+        
+        # 调试输出 - 显示力的信息
+        if dynamic_obstacles:
+            static_magnitude = np.linalg.norm(static_repulsive)
+            dynamic_magnitude = np.linalg.norm(dynamic_repulsive)
+            attractive_magnitude = np.linalg.norm(attractive_force)
+            total_magnitude = np.linalg.norm(total_force)
+            
+            # 计算力的方向
+            if dynamic_magnitude > 0:
+                dynamic_dir = dynamic_repulsive / dynamic_magnitude
+            else:
+                dynamic_dir = np.array([0.0, 0.0])
+                
+            if attractive_magnitude > 0:
+                attractive_dir = attractive_force / attractive_magnitude
+            else:
+                attractive_dir = np.array([0.0, 0.0])
+                
+            if total_magnitude > 0:
+                total_dir = total_force / total_magnitude
+            else:
+                total_dir = np.array([0.0, 0.0])
+            
+            print(f"调试 - 引力: {attractive_magnitude:.2f}({attractive_dir[0]:.2f},{attractive_dir[1]:.2f}), "
+                  f"静态斥力: {static_magnitude:.2f}, 动态斥力: {dynamic_magnitude:.2f}({dynamic_dir[0]:.2f},{dynamic_dir[1]:.2f}), "
+                  f"合力: {total_magnitude:.2f}({total_dir[0]:.2f},{total_dir[1]:.2f})")
 
         # ---------- 计算下一步位置 ----------
         if np.linalg.norm(total_force) > 0:
@@ -245,139 +232,60 @@ class APFLocalPlanner(BaseLocalPlanner):
 
         self.last_distance_to_target = distance_to_target
 
-        if self.stuck_counter > self.max_stuck_steps:
-            print(f"⚠️ 当前目标点 {self.current_target_idx} 被阻挡，自动跳过/启用绕行策略。")
+        # 根据与目标的距离自适应调整阻塞检测阈值，让“绕行”判断更敏感
+        adaptive_limit = self.max_stuck_steps
+        if distance_to_target < 80:
+            adaptive_limit = min(adaptive_limit, 4)
+        elif distance_to_target < 150:
+            adaptive_limit = min(adaptive_limit, 6)
+        else:
+            adaptive_limit = min(adaptive_limit, 8)
+
+        if self.stuck_counter > adaptive_limit:
+            print(f"当前目标点 {self.current_target_idx} 被阻挡，自动跳过。")
             self.stuck_counter = 0
             self.last_distance_to_target = float('inf')
 
-            if global_path is not None and len(global_path) > 0:
+            if global_path is not None:
                 self.current_target_idx += 1
                 if self.current_target_idx < len(global_path):
                     # 跳过当前目标点，继续规划下一个
                     return self.plan(current_pos, global_path[self.current_target_idx],
                                     static_obstacles, dynamic_obstacles, velocity, global_path)
                 else:
-                    print("⚠️ 所有目标点均无法到达，规划终止。")
+                    print("所有目标点均无法到达，规划终止。")
                     return current_pos
-            else:
-                # 无全局路径场景：当前终点长期不可达，改为启用临时目标点进行绕行
-                print("⚠️ 无全局路径场景下终点长期不可达，启用临时目标点绕行。")
-                temp = self._select_temp_goal(current_pos, target_pos, static_obstacles, dynamic_obstacles)
-                if temp is not None:
-                    self.use_temp_goal = True
-                    self.temp_goal = temp
-                    self.temp_goal_count = 0
-                # 本次不再前进，由下一次调用根据临时目标点重新规划
-                return current_pos
-
-        next_pos = self._enforce_motion_constraints(current_pos, next_pos, current_velocity)
-
-        # ---------- 记录当前步的威胁与最近距离，用于后续分析 ----------
-        try:
-            total_threat = max(max_static_threat, max_dynamic_threat)
-            log_entry = {
-                'step': len(self.debug_logs),
-                'x': float(current_pos[0]),
-                'y': float(current_pos[1]),
-                'min_obstacle_distance': float(min_obstacle_distance) if min_obstacle_distance is not None else None,
-                'static_threat': float(max_static_threat),
-                'dynamic_threat': float(max_dynamic_threat),
-                'total_threat': float(total_threat),
-            }
-            self.debug_logs.append(log_entry)
-        except Exception:
-            pass
 
         return next_pos
 
-    def _try_tangent_around_static_obstacle(self, current_pos: np.ndarray, target_pos: np.ndarray, static_obstacles: List) -> Optional[np.ndarray]:
-        """在特殊几何情况下优先采用“右侧绕行”的切向步长。
-
-        条件：
-        - 当前点到目标点的连线与某个静态障碍物（多边形）相交；
-        - 当前点距离该障碍物中心小于（等效半径 + 安全裕度）。
-
-        满足条件时：
-        - 计算当前点相对于障碍物中心的方向向量 r；
-        - 在平面上以 r 为半径向量，取右手法则方向的切向向量 t = (r_y, -r_x)；
-        - 沿 t 方向迈出一步（步长不超过 max_step），返回该位置。
+    def _is_target_blocked(self, target_pos, static_obstacles, dynamic_obstacles):
         """
-        if not static_obstacles:
-            return None
+        判断目标点是否被障碍物覆盖/穿透
+        """
+        target_point = Point(target_pos[0], target_pos[1])
 
-        try:
-            line_to_goal = LineString([tuple(current_pos), tuple(target_pos)])
-        except Exception:
-            return None
-
-        best_step = None
-        best_obstacle_dist = float('inf')
-
+        # 静态障碍物：检查目标点是否被多边形包含
         for obstacle in static_obstacles:
             try:
-                if len(obstacle) < 3:
-                    continue
-                if obstacle[0] != obstacle[-1]:
-                    obstacle_poly = Polygon(obstacle + [obstacle[0]])
-                else:
-                    obstacle_poly = Polygon(obstacle)
-
-                # 如果当前到目标的直线根本不碰这个障碍物，就不需要特别处理
-                try:
-                    if not line_to_goal.intersects(obstacle_poly):
-                        continue
-                except Exception:
-                    continue
-
-                # 估计障碍物中心和等效半径
-                center = np.array(obstacle_poly.centroid.coords[0], dtype=float)
-                area = max(obstacle_poly.area, 0.0)
-                approx_radius = math.sqrt(area / (math.pi + 1e-6))
-
-                # 当前点到中心的距离
-                vec_to_center = current_pos - center
-                dist_to_center = np.linalg.norm(vec_to_center)
-
-                # 只有在足够靠近障碍物时才启动切向策略
-                safety_margin = max(20.0, 0.5 * approx_radius)
-                trigger_dist = approx_radius + safety_margin
-                if approx_radius < 1e-3 or dist_to_center > trigger_dist:
-                    continue
-
-                # 选择“右侧”绕行：以从中心指向当前点的向量为 r，
-                # 右侧切向 t = (r_y, -r_x)
-                if dist_to_center < 1e-6:
-                    # 极端情况：恰好在中心附近，随便给一个方向
-                    radial_dir = np.array([1.0, 0.0])
-                else:
-                    radial_dir = vec_to_center / dist_to_center
-
-                tangent_dir = np.array([radial_dir[1], -radial_dir[0]])
-                if np.linalg.norm(tangent_dir) < 1e-6:
-                    continue
-                tangent_dir = tangent_dir / np.linalg.norm(tangent_dir)
-
-                step_len = min(self.config['max_step'], max(10.0, 0.5 * trigger_dist))
-                candidate_pos = current_pos + tangent_dir * step_len
-
-                # 确保候选点不在障碍物内部，如在内部则沿径向方向稍微推出去
-                try:
-                    cand_point = Point(float(candidate_pos[0]), float(candidate_pos[1]))
-                    if obstacle_poly.contains(cand_point):
-                        # 往外推到障碍边界稍远处
-                        push_len = max(5.0, 0.2 * approx_radius)
-                        candidate_pos = candidate_pos + radial_dir * push_len
-                except Exception:
-                    pass
-
-                # 记录距离最近的那个障碍物对应的切向步长
-                if dist_to_center < best_obstacle_dist:
-                    best_obstacle_dist = dist_to_center
-                    best_step = candidate_pos
+                if len(obstacle) >= 3:
+                    if obstacle[0] != obstacle[-1]:
+                        poly = Polygon(obstacle + [obstacle[0]])
+                    else:
+                        poly = Polygon(obstacle)
+                    if poly.contains(target_point):
+                        return True
             except Exception:
                 continue
 
-        return best_step
+        # 动态障碍物：判断目标点是否落入动态障碍物的覆盖半径
+        for obstacle in dynamic_obstacles:
+            if hasattr(obstacle, 'position') and hasattr(obstacle, 'size'):
+                obs_pos = obstacle.position
+                distance = np.linalg.norm(np.array(obs_pos) - np.array(target_pos))
+                if distance <= float(obstacle.size):
+                    return True
+
+        return False
 
     
     def _update_history(self, position):
@@ -535,60 +443,25 @@ class APFLocalPlanner(BaseLocalPlanner):
                 if hasattr(obstacle, 'position') and hasattr(obstacle, 'size'):
                     # 计算动态障碍物的预测位置
                     if hasattr(obstacle, 'direction') and hasattr(obstacle, 'speed'):
-                        velocity = np.array(obstacle.direction) * float(obstacle.speed)
-                        predicted_position = np.array(obstacle.position) + velocity * self.config['prediction_time']
+                        # direction 需单位化，否则预测会炸裂
+                        direction = np.array(obstacle.direction)
+                        if np.linalg.norm(direction) > 0:
+                            direction = direction / np.linalg.norm(direction)
+                        
+                        predicted_position = np.array(obstacle.position) + direction * float(obstacle.speed) * self.config['prediction_time']
                     else:
                         predicted_position = np.array(obstacle.position)
                     
-                    # 创建表示障碍物的点（简化为点碰撞检测）
-                    obs_point = Point(predicted_position[0], predicted_position[1])
+                    # 使用半径进行碰撞检测（修复：使用 radius + safety_distance）
+                    radius = float(obstacle.size)
+                    circle = Point(predicted_position[0], predicted_position[1]).buffer(radius + self.config['dynamic_safety_distance'])
                     
-                    # 检查线段与障碍物的距离是否小于安全距离
-                    if line.distance(obs_point) < float(obstacle.size) + self.config['dynamic_safety_distance']:
+                    # 检查线段是否与障碍物圆圈相交
+                    if line.intersects(circle):
                         return True
             except Exception:
                 continue
         
-        return False
-    
-    def _is_target_blocked(self, current_pos, target_pos, static_obstacles, dynamic_obstacles):
-        """判断全局路径上的某个目标点是否被障碍物直接覆盖
-
-        注意：这里只关心“点本身是否落在障碍物里/太近”，
-        不再用 current_pos->target_pos 直线是否穿过障碍 来决定是否跳点，
-        避免把障碍物后面的所有路径点都判为不可达。
-        """
-        # 1) 静态多边形：目标点是否在多边形内部或边界上
-        try:
-            target_point = Point(float(target_pos[0]), float(target_pos[1]))
-        except Exception:
-            return False
-
-        for obstacle in static_obstacles:
-            try:
-                if len(obstacle) >= 3:
-                    if obstacle[0] != obstacle[-1]:
-                        obstacle_poly = Polygon(obstacle + [obstacle[0]])
-                    else:
-                        obstacle_poly = Polygon(obstacle)
-                    if obstacle_poly.contains(target_point) or obstacle_poly.touches(target_point):
-                        return True
-            except Exception:
-                continue
-
-        # 2) 动态障碍：目标点是否落在动态障碍的安全半径附近
-        for obstacle in dynamic_obstacles:
-            try:
-                if hasattr(obstacle, 'position') and hasattr(obstacle, 'size'):
-                    obs_pos = np.array(obstacle.position, dtype=float)
-                    distance = np.linalg.norm(obs_pos - np.array(target_pos, dtype=float))
-                    # 这里用较保守的判定：障碍本体半径 + 一小段安全距离
-                    safe_dist = float(obstacle.size) + self.config['dynamic_safety_distance'] * 0.5
-                    if distance <= safe_dist:
-                        return True
-            except Exception:
-                continue
-
         return False
     
     def _find_collision_free_direction(self, current_pos, original_direction, static_obstacles, dynamic_obstacles):
@@ -629,6 +502,185 @@ class APFLocalPlanner(BaseLocalPlanner):
         reduced_step = self.config['max_step'] * 0.5
         return current_pos + original_direction * reduced_step
     
+    def _calculate_dynamic_repulsion(self, current_pos, dynamic_obstacles):
+        """
+        计算动态障碍物的斥力（修复版本）
+        
+        Args:
+            current_pos: 当前位置
+            dynamic_obstacles: 动态障碍物列表
+            
+        Returns:
+            动态障碍物斥力向量
+        """
+        repulsive_force = np.zeros(2)
+
+        for obs in dynamic_obstacles:
+            try:
+                # 1. 障碍物当前和预测位置
+                pos = np.array(obs.position)
+                radius = float(obs.size)
+
+                # direction 需单位化，否则预测会炸裂
+                direction = np.array(obs.direction)
+                if np.linalg.norm(direction) > 0:
+                    direction = direction / np.linalg.norm(direction)
+
+                pred_pos = pos + direction * obs.speed * self.config['prediction_time']
+
+                # 2. 计算机器人与预测位置的距离
+                diff = current_pos - pred_pos
+                dist = np.linalg.norm(diff)
+
+                influence = self.config['dynamic_influence_distance']
+                safety = self.config['dynamic_safety_distance'] + radius
+
+                # 🎯 修复远距离斥力为0的问题
+                # 不再跳过远距离障碍物，而是限制最大距离
+                if dist > influence:
+                    dist = influence  # 限制最大距离，确保斥力不为0
+
+                # 调试障碍物尺寸
+                if dist < influence * 0.8:  # 只在接近时输出调试信息
+                    print(f"障碍物调试 - 位置: ({pos[0]:.1f},{pos[1]:.1f}), 半径: {radius:.1f}, 速度: {obs.speed:.2f}")
+
+                if dist < 1e-5:
+                    continue
+
+                # 3. 威胁指数（距离、速度、方向）
+                # 障碍物是否正朝机器人移动
+                relative_dir = direction  # 障碍物前进方向
+                to_robot = (current_pos - pos)
+                if np.linalg.norm(to_robot) > 0:
+                    to_robot = to_robot / np.linalg.norm(to_robot)
+
+                direction_factor = np.dot(relative_dir, to_robot)  # 朝着你冲过来 → 正数
+
+                # 动态障碍物危险度模型（速度 + 接近方向 + 距离）
+                # 修复接近速度计算 - 使用障碍物速度向量
+                obstacle_velocity = direction * obs.speed
+                relative_velocity = obstacle_velocity  # 障碍物相对于USV的速度
+                
+                # 计算障碍物朝向USV的速度分量
+                to_obstacle = pred_pos - current_pos
+                if np.linalg.norm(to_obstacle) > 0:
+                    to_obstacle_normalized = to_obstacle / np.linalg.norm(to_obstacle)
+                    closing_speed = np.dot(relative_velocity, to_obstacle_normalized)
+                else:
+                    closing_speed = 0.0
+                
+                closing_speed = max(0, closing_speed)  # 只有接近才算威胁，远离不算
+
+                speed_factor = 1 + closing_speed * 2   # 降低速度增强倍数，避免过度反应
+
+                # 调试威胁计算
+                if dist < influence * 0.8:  # 只在接近时输出调试信息
+                    print(f"威胁调试 - 距离: {dist:.1f}, 接近速度: {closing_speed:.2f}, "
+                          f"速度增强: {speed_factor:.2f}, 方向因子: {direction_factor:.2f}")
+
+                # 改进斥力：使用更直接的距离衰减公式
+                if dist < safety:  # 在安全距离内，强力避障
+                    rep_magnitude = (
+                        self.config['repulsive_gain'] * speed_factor * (1.0 - dist / safety)
+                    )
+                else:  # 在影响距离内，渐进避障
+                    rep_magnitude = (
+                        self.config['repulsive_gain'] * speed_factor * 
+                        (1.0 / dist - 1.0 / influence)
+                    )
+
+                rep = rep_magnitude * (diff / dist)
+
+                # 🎯 切向力实现自然绕行（用户方案）
+                if np.linalg.norm(rep) > 0:
+                    rep_dir = rep / np.linalg.norm(rep)
+                    
+                    # 计算法向（垂直）方向：用于切向避障
+                    tangent_dir = np.array([-rep_dir[1], rep_dir[0]])  # 逆时针旋转90°
+                    
+                    # 判断应该往左绕还是往右绕：根据相对运动方向
+                    obs_vel = direction * obs.speed
+                    cross = obs_vel[0] * rep_dir[1] - obs_vel[1] * rep_dir[0]  # 2D cross product
+                    
+                    if cross < 0:  
+                        tangent_dir = -tangent_dir  # 改成顺时针方向
+                    
+                    # 组合力（非常关键）
+                    alpha = 0.9    # 切向力权重，0~1，越大越偏向绕行（提高到0.9）
+                    rep = rep_magnitude * ((1-alpha) * rep_dir + alpha * tangent_dir)
+                    
+                    # 调试切向力
+                    if dist < influence * 0.8:
+                        print(f"切向绕行 - 法向: ({rep_dir[0]:.2f},{rep_dir[1]:.2f}), "
+                              f"切向: ({tangent_dir[0]:.2f},{tangent_dir[1]:.2f}), "
+                              f"叉积: {cross:.2f}, alpha: {alpha}")
+
+                # 调试斥力输出
+                if dist < influence * 0.8:
+                    rep_magnitude_final = np.linalg.norm(rep)
+                    print(f"改进斥力 - 距离: {dist:.1f}, 接近速度: {closing_speed:.2f}, "
+                          f"速度增强: {speed_factor:.2f}, 斥力大小: {rep_magnitude_final:.2f}")
+
+                # 限制斥力大小，防止爆炸
+                repulsive_force += np.clip(rep, -10000, 10000)  # 进一步增大力上限
+                
+            except Exception as e:
+                continue
+
+        return repulsive_force
+
+    def _calculate_static_repulsion(self, current_pos, static_obstacles):
+        """
+        计算静态障碍物的斥力
+        
+        Args:
+            current_pos: 当前位置
+            static_obstacles: 静态障碍物列表
+            
+        Returns:
+            静态障碍物斥力向量
+        """
+        total_repulsive = np.zeros(2)
+        current_point = Point(current_pos[0], current_pos[1])
+        
+        # 1. 处理静态障碍物（多边形）
+        for obstacle in static_obstacles:
+            try:
+                # 假设静态障碍物是多边形坐标点列表
+                if len(obstacle) >= 3:
+                    # 确保多边形闭合
+                    if obstacle[0] != obstacle[-1]:
+                        obstacle_poly = Polygon(obstacle + [obstacle[0]])
+                    else:
+                        obstacle_poly = Polygon(obstacle)
+                    
+                    # 计算到多边形的最短距离
+                    if obstacle_poly.is_valid:
+                        distance = current_point.distance(obstacle_poly)
+                        
+                        if distance < self.config['static_influence_distance']:
+                            # 找到最近点
+                            closest_point = obstacle_poly.exterior.interpolate(
+                                obstacle_poly.exterior.project(current_point))
+                            closest_coords = np.array([closest_point.x, closest_point.y])
+                            
+                            # 计算斥力方向和大小
+                            direction = current_pos - closest_coords
+                            if np.linalg.norm(direction) > 0:
+                                direction = direction / np.linalg.norm(direction)
+                                
+                                # 使用改进的斥力公式
+                                distance = max(distance, 0.1)  # 避免除零
+                                force_magnitude = self.config['repulsive_gain'] * (
+                                    1.0 / distance - 1.0 / self.config['static_safety_distance']
+                                ) * (1.0 / (distance ** 2))
+                                
+                                total_repulsive += direction * force_magnitude
+            except Exception as e:
+                continue
+        
+        return total_repulsive
+    
     def _calculate_attractive_force(self, current_pos: np.ndarray, target_pos: np.ndarray) -> np.ndarray:
         """
         计算引力
@@ -648,8 +700,7 @@ class APFLocalPlanner(BaseLocalPlanner):
             return force_magnitude * direction / distance
         return np.zeros(2)
     
-    def _calculate_repulsive_force(self, current_pos: np.ndarray, static_obstacles: List,
-                                   dynamic_obstacles: List, velocity: np.ndarray):
+    def _calculate_repulsive_force(self, current_pos: np.ndarray, static_obstacles: List, dynamic_obstacles: List, target_pos: np.ndarray = None) -> np.ndarray:
         """
         计算所有障碍物的斥力
         
@@ -657,18 +708,12 @@ class APFLocalPlanner(BaseLocalPlanner):
             current_pos: 当前位置
             static_obstacles: 静态障碍物列表
             dynamic_obstacles: 动态障碍物列表
-            velocity: 当前速度向量
             
         Returns:
             总斥力向量
         """
         total_repulsive = np.zeros(2)
-        max_static_threat = 0.0
-        max_dynamic_threat = 0.0
-        min_obstacle_distance = None
         current_point = Point(current_pos[0], current_pos[1])
-        braking_distance = self._compute_braking_distance(velocity)
-        threat_threshold = self.config['threat_threshold']
         
         # 1. 处理静态障碍物（多边形）
         for obstacle in static_obstacles:
@@ -683,21 +728,6 @@ class APFLocalPlanner(BaseLocalPlanner):
                     
                     # 计算点到多边形的距离和最近点
                     distance = current_point.distance(obstacle_poly)
-
-                    # 记录最近障碍物距离
-                    if min_obstacle_distance is None or distance < min_obstacle_distance:
-                        min_obstacle_distance = float(distance)
-
-                    # 根据多边形面积估计一个“等效半径”，用于放大小障碍物的安全距离/影响范围
-                    # area ≈ π R^2  =>  R ≈ sqrt(area / π)
-                    try:
-                        approx_radius = math.sqrt(max(obstacle_poly.area, 0.0) / (math.pi + 1e-6))
-                    except Exception:
-                        approx_radius = 0.0
-                    # 对于非常小的障碍物，近似为 0；对于大障碍物，此值显著增大
-                    # 系数适当加大，以拉开大小障碍物的“提前躲避”距离差异
-                    size_safety_extra = 1.0 * approx_radius
-                    size_influence_extra = 2.0 * approx_radius
                     
                     # 获取最近点（用于确定斥力方向）
                     if current_point.distance(obstacle_poly) < 1e-6:
@@ -709,40 +739,15 @@ class APFLocalPlanner(BaseLocalPlanner):
                     
                     # 计算斥力
                     direction = current_pos - closest_point
-                    threat_index = self._compute_static_threat_index(
-                        current_pos,
-                        obstacle_poly,
-                        distance,
-                        braking_distance
-                    )
-                    if threat_index > max_static_threat:
-                        max_static_threat = float(threat_index)
-                    if threat_index < threat_threshold:
-                        # 威胁低于阈值：认为对当前路径基本无影响，不产生斥力
-                        continue
-
-                    # 对刚超过阈值的威胁做“软启动”：
-                    # threat_index 在 [threshold, 1] 映射到 [0, 1]
-                    norm_threat = (threat_index - threat_threshold) / (1.0 - threat_threshold + 1e-6)
-                    # 低威胁（norm_threat 接近 0）斥力非常小，高威胁才被放大
-                    soft_factor = norm_threat ** 2
-                    gain_scale = 1.0 + self.config['threat_gain_scale'] * soft_factor
-                    range_scale = 1.0 + self.config['threat_range_scale'] * soft_factor
-
-                    # 静态安全距离/影响距离随障碍物尺寸增加：
-                    #   小障碍物几乎不变，大障碍物的安全圈明显增大，从而更早开始躲避
-                    static_safe = self.config['static_safety_distance'] + size_safety_extra
-                    static_influence = (self.config['static_influence_distance'] + size_influence_extra) * range_scale
-
                     static_rep_force = self._calculate_static_obstacle_repulsion(
-                        direction, distance, static_safe,
-                        static_influence,
-                        self.config['repulsive_gain'] * gain_scale)
+                        direction, distance, self.config['static_safety_distance'], 
+                        self.config['static_influence_distance'])
                     total_repulsive += static_rep_force
             except Exception as e:
                 continue
         
-        # 2. 处理动态障碍物
+        # 2. 处理动态障碍物 - 所有动态障碍物都产生斥力
+        high_threat_obstacles = []
         for obstacle in dynamic_obstacles:
             try:
                 # 检查是否为DynamicObstacle对象
@@ -755,121 +760,122 @@ class APFLocalPlanner(BaseLocalPlanner):
                     obs_direction = np.array(obstacle.direction)
                     obs_speed = float(obstacle.speed)
                     
-                    # 计算动态障碍物速度
-                    obs_velocity = obs_direction * obs_speed
-
-                    # --- 基于相对速度的自适应预测时间（TTC） ---
-                    # 相对位置与相对速度
-                    rel_pos = obs_position - current_pos
-                    rel_vel = obs_velocity - velocity
-
-                    # 默认预测时间：配置中的 prediction_time
-                    t_predict = self.config['prediction_time']
-
-                    # 若存在明显的相对速度，基于 TTC 估算可能的碰撞时间
-                    rel_speed_sq = float(np.dot(rel_vel, rel_vel))
-                    if rel_speed_sq > 1e-6:
-                        # 线性模型下的最小距离时间 t* = - (r·v) / |v|^2
-                        t_star = - float(np.dot(rel_pos, rel_vel)) / rel_speed_sq
-                        # 只关心未来一段时间内的潜在碰撞（t>0）
-                        if t_star > 0.0:
-                            # 将预测时间限制在 [0.3, 1.5 * prediction_time]
-                            t_min = 0.3
-                            t_max = 1.5 * self.config['prediction_time']
-                            t_predict = max(t_min, min(t_star, t_max))
-
-                    # 使用自适应预测时间得到障碍物未来位置
-                    predicted_position = obs_position + obs_velocity * t_predict
+                    # 计算动态障碍物的预测位置
+                    velocity = obs_direction * obs_speed
+                    predicted_position = obs_position + velocity * self.config['prediction_time']
                     
-                    # 计算到预测位置的距离和方向（径向斥力方向）
-                    direction = current_pos - predicted_position
-                    distance = np.linalg.norm(direction)
+                    # 计算到预测位置的距离和方向
+                    direction_to_predicted = current_pos - predicted_position
+                    distance = np.linalg.norm(direction_to_predicted)
                     
-                    threat_level = self._compute_dynamic_threat_index(
-                        current_pos,
-                        obs_position,
-                        predicted_position,
-                        obs_size,
-                        obs_velocity,
-                        distance,
-                        braking_distance,
-                        velocity
-                    )
-                    if threat_level < threat_threshold:
-                        # 低威胁动态障碍只作为背景存在，不施加斥力
-                        continue
-
-                    # 同样对动态障碍的威胁做软启动
-                    dyn_norm_threat = (threat_level - threat_threshold) / (1.0 - threat_threshold + 1e-6)
-                    dyn_soft_factor = dyn_norm_threat ** 2
-                    # 高威胁才显著放大斥力和作用范围
-                    gain_scale = 1.0 + self.config['threat_gain_scale'] * dyn_soft_factor
-                    range_scale = 1.0 + self.config['threat_range_scale'] * dyn_soft_factor
+                    # 智能斥力方向计算
+                    if distance > 0:
+                        # 基础方向：远离预测位置
+                        base_direction = direction_to_predicted / distance
+                        
+                        # 获取障碍物运动方向
+                        obs_velocity_dir = obs_direction / np.linalg.norm(obs_direction) if np.linalg.norm(obs_direction) > 0 else np.array([1.0, 0.0])
+                        
+                        # 计算障碍物朝向当前点的方向
+                        to_current_dir = current_pos - obs_position
+                        if np.linalg.norm(to_current_dir) > 0:
+                            to_current_dir = to_current_dir / np.linalg.norm(to_current_dir)
+                        
+                        # 判断是否为对向行驶（障碍物朝向当前位置移动）
+                        approach_factor = np.dot(obs_velocity_dir, to_current_dir)
+                        
+                        # 调试对向检测
+                        print(f"调试对向检测 - approach_factor: {approach_factor:.3f}, "
+                              f"obs_velocity_dir: ({obs_velocity_dir[0]:.2f},{obs_velocity_dir[1]:.2f}), "
+                              f"to_current_dir: ({to_current_dir[0]:.2f},{to_current_dir[1]:.2f})")
+                        
+                        if approach_factor < -0.3:  # 对向行驶，需要侧向避障
+                            # 对于对向行驶的障碍物，选择真正的左右方向避障
+                            # 而不是垂直于障碍物运动方向
+                            
+                            # 计算从障碍物到当前位置的方向
+                            to_current = current_pos - obs_position
+                            if np.linalg.norm(to_current) > 0:
+                                to_current = to_current / np.linalg.norm(to_current)
+                            
+                            # 计算垂直于连接线的侧向方向（真正的左右避障）
+                            lateral_dir1 = np.array([-to_current[1], to_current[0]])  # 左转90度
+                            lateral_dir2 = np.array([to_current[1], -to_current[0]])   # 右转90度
+                            
+                            # 选择更接近目标的侧向方向
+                            target_dir = target_pos - current_pos
+                            if np.linalg.norm(target_dir) > 0:
+                                target_dir = target_dir / np.linalg.norm(target_dir)
+                            
+                            lateral_score1 = np.dot(lateral_dir1, target_dir)
+                            lateral_score2 = np.dot(lateral_dir2, target_dir)
+                            
+                            # 选择得分更高的侧向方向
+                            if lateral_score1 > lateral_score2:
+                                preferred_lateral = lateral_dir1
+                            else:
+                                preferred_lateral = lateral_dir2
+                            
+                            print(f"调试侧向避障 - to_current: ({to_current[0]:.2f},{to_current[1]:.2f}), "
+                                  f"lateral_dir1: ({lateral_dir1[0]:.2f},{lateral_dir1[1]:.2f}), "
+                                  f"lateral_dir2: ({lateral_dir2[0]:.2f},{lateral_dir2[1]:.2f}), "
+                                  f"preferred_lateral: ({preferred_lateral[0]:.2f},{preferred_lateral[1]:.2f})")
+                            
+                            # 混合基础方向和侧向方向
+                            direction = 0.2 * base_direction + 0.8 * preferred_lateral  # 增强侧向权重
+                            direction = direction / np.linalg.norm(direction)
+                            
+                            print(f"调试混合方向 - base_direction: ({base_direction[0]:.2f},{base_direction[1]:.2f}), "
+                                  f"final_direction: ({direction[0]:.2f},{direction[1]:.2f})")
+                        else:
+                            # 非对向行驶，使用基础方向
+                            direction = base_direction
+                            print(f"调试基础避障 - direction: ({direction[0]:.2f},{direction[1]:.2f})")
+                    else:
+                        direction = np.array([1.0, 0.0])
+                    
+                    # 计算威胁等级 - 使用预测位置进行更准确的威胁评估
+                    threat_level = self._calculate_threat_level(
+                        current_pos, predicted_position, obs_size, obs_speed, obs_direction)
+                    
+                    # 计算动态障碍物斥力 - 所有动态障碍物都计算斥力
                     dynamic_rep_force = self._calculate_dynamic_obstacle_repulsion(
                         direction, distance, obs_size, threat_level, 
                         self.config['dynamic_safety_distance'],
-                        self.config['dynamic_influence_distance'] * range_scale,
-                        self.config['repulsive_gain'] * gain_scale)
-
-                    # 额外的切向（侧向）避障力：用于打破正面相向时引力/斥力共线的问题
-                    tangent_force = np.zeros(2)
-                    try:
-                        # 只有在障碍基本位于前方且威胁较大时才启用
-                        if distance > 1e-3 and threat_level >= threat_threshold * 1.5:
-                            # 若当前速度近似为零，则用目标方向代替
-                            ref_dir = velocity.copy()
-                            if np.linalg.norm(ref_dir) < 1e-3 and global_path is not None and len(global_path) > 0:
-                                ref_dir = np.array(global_path[-1]) - current_pos
-                            if np.linalg.norm(ref_dir) < 1e-3:
-                                ref_dir = np.array([1.0, 0.0])
-
-                            ref_dir = ref_dir / np.linalg.norm(ref_dir)
-
-                            # 前方判定：障碍在 ref_dir 前方且距离不远
-                            to_obs = predicted_position - current_pos
-                            proj_len = float(np.dot(to_obs, ref_dir))
-                            if proj_len > 0:
-                                # 使用二维“叉积”符号决定向上绕行还是向下绕行
-                                cross_z = ref_dir[0] * to_obs[1] - ref_dir[1] * to_obs[0]
-                                # 选择一侧切向单位向量
-                                if abs(cross_z) < 1e-6:
-                                    # 完全正对，任意给一个垂直方向
-                                    tangent_dir = np.array([ref_dir[1], -ref_dir[0]])
-                                else:
-                                    # 根据相对位置决定左右绕行
-                                    sign = np.sign(cross_z)
-                                    tangent_dir = sign * np.array([ref_dir[1], -ref_dir[0]])
-
-                                tangent_dir = tangent_dir / np.linalg.norm(tangent_dir)
-
-                                # 切向力大小与威胁等级和距离成反比
-                                tangent_strength = self.config['repulsive_gain'] * dyn_soft_factor / max(distance, 5.0)
-                                # 稍微缩放，防止侧向力过猛
-                                tangent_strength *= 0.3
-                                tangent_force = tangent_dir * tangent_strength
-                    except Exception:
-                        tangent_force = np.zeros(2)
-
-                    total_repulsive += dynamic_rep_force + tangent_force
-
-                    # 记录最近动态障碍距离（用圆心距离减半径的简化近似）
-                    try:
-                        center_dist = max(0.0, distance - obs_size)
-                        if min_obstacle_distance is None or center_dist < min_obstacle_distance:
-                            min_obstacle_distance = float(center_dist)
-                    except Exception:
-                        pass
-
-                    if threat_level > max_dynamic_threat:
-                        max_dynamic_threat = float(threat_level)
+                        self.config['dynamic_influence_distance'])
+                    total_repulsive += dynamic_rep_force
+                    
+                    # 记录高威胁障碍物 - 降低阈值，更容易触发智能避障
+                    if threat_level > 0.3:  # 降低高威胁阈值从0.7到0.3
+                        high_threat_obstacles.append({
+                            'obstacle': obstacle,
+                            'position': obs_position,
+                            'predicted_position': predicted_position,
+                            'direction': direction,
+                            'distance': distance,
+                            'threat_level': threat_level,
+                            'velocity': velocity
+                        })
             except Exception as e:
                 continue
         
-        return total_repulsive, max_static_threat, max_dynamic_threat, min_obstacle_distance
+        # 3. 高威胁障碍物的智能侧向避障
+        if high_threat_obstacles:
+            # 选择威胁最高的障碍物
+            most_threatening = max(high_threat_obstacles, key=lambda x: x['threat_level'])
+            
+            # 计算智能侧向避障力
+            lateral_avoidance_force = self._calculate_lateral_avoidance_force(
+                current_pos, most_threatening, target_pos)
+            
+            # 根据威胁等级调整侧向避障力的权重
+            lateral_weight = min(1.0, most_threatening['threat_level'])
+            total_repulsive += lateral_avoidance_force * lateral_weight
+        
+        return total_repulsive
     
     def _calculate_static_obstacle_repulsion(self, direction: np.ndarray, distance: float, 
-                                           safety_distance: float, influence_distance: float,
-                                           repulsive_gain: float) -> np.ndarray:
+                                           safety_distance: float, influence_distance: float) -> np.ndarray:
         """
         计算静态多边形障碍物的斥力
         
@@ -878,14 +884,13 @@ class APFLocalPlanner(BaseLocalPlanner):
             distance: 当前位置到障碍物的距离
             safety_distance: 安全距离
             influence_distance: 影响距离
-            repulsive_gain: 调整后的斥力增益
             
         Returns:
             斥力向量
         """
         # 如果距离过小，设置一个小值避免除零
         if distance < 1e-6:
-            return np.array([1.0, 0.0]) * repulsive_gain * 10.0
+            return np.array([1.0, 0.0]) * self.config['repulsive_gain'] * 10.0
         
         # 标准化方向向量
         normalized_dir = direction / np.linalg.norm(direction)
@@ -895,12 +900,12 @@ class APFLocalPlanner(BaseLocalPlanner):
         
         if distance < safety_distance:
             # 在安全距离内，斥力随距离减小而增大
-            force_magnitude = repulsive_gain * (1.0 / distance - 1.0 / safety_distance) / (distance ** 2)
+            force_magnitude = self.config['repulsive_gain'] * (1.0 / distance - 1.0 / safety_distance) / (distance ** 2)
             return normalized_dir * force_magnitude
         elif distance < max_influence_distance:
             # 在影响范围内，斥力随距离增大而衰减
             decay_factor = (max_influence_distance - distance) / (max_influence_distance - safety_distance)
-            force_magnitude = repulsive_gain * decay_factor / (distance ** 2)
+            force_magnitude = self.config['repulsive_gain'] * decay_factor / (distance ** 2)
             return normalized_dir * force_magnitude
         else:
             # 超出影响范围，无斥力
@@ -908,10 +913,9 @@ class APFLocalPlanner(BaseLocalPlanner):
     
     def _calculate_dynamic_obstacle_repulsion(self, direction: np.ndarray, distance: float, 
                                             obs_size: float, threat_level: float, 
-                                            safety_distance: float, influence_distance: float,
-                                            repulsive_gain: float) -> np.ndarray:
+                                            safety_distance: float, influence_distance: float) -> np.ndarray:
         """
-        计算动态障碍物的斥力
+        计算动态障碍物的斥力（优化版）
         
         Args:
             direction: 从障碍物预测位置指向当前位置的方向向量
@@ -924,9 +928,9 @@ class APFLocalPlanner(BaseLocalPlanner):
         Returns:
             斥力向量
         """
-        # 如果距离过小，设置一个小值避免除零
+        # 如果距离过小，设置紧急避障斥力
         if distance < 1e-6:
-            return np.array([1.0, 0.0]) * repulsive_gain * 20.0 * max(threat_level, 0.1)
+            return np.array([1.0, 0.0]) * self.config['repulsive_gain'] * 30.0 * threat_level
         
         # 标准化方向向量
         normalized_dir = direction / np.linalg.norm(direction)
@@ -937,155 +941,192 @@ class APFLocalPlanner(BaseLocalPlanner):
         # 最大影响距离
         max_influence_distance = safe_distance + influence_distance
         
+        # 基础斥力系数乘以威胁等级
+        effective_gain = self.config['repulsive_gain'] * threat_level
+        
         # 优化斥力计算函数，使动态障碍物也能提前感知
         if distance < max_influence_distance:
             # 1. 基础斥力
-            base_repulsion = repulsive_gain * max(threat_level, 0.1) / (distance ** 2)
+            base_repulsion = effective_gain / (distance ** 2)
             
-            # 2. 距离衰减因子 - 使用平滑的二次函数衰减
-            distance_factor = (1.0 - (distance / max_influence_distance) ** 2) ** 2
+            # 2. 距离衰减因子 - 使用更平滑的三次函数衰减
+            distance_ratio = distance / max_influence_distance
+            distance_factor = (1.0 - distance_ratio ** 3) ** 3
             
             # 3. 安全距离内的强化因子
             if distance < safe_distance:
-                # 在安全距离内，进一步增强斥力
-                safety_factor = 2.5  # 动态障碍物需要更强的安全因子
+                # 在安全距离内，根据距离程度分级强化斥力
+                if distance < safe_distance * 0.5:
+                    safety_factor = 4.0  # 极近距离，强力避障
+                else:
+                    safety_factor = 3.0  # 近距离，强化避障
             else:
                 safety_factor = 1.0
             
-            # 4. 动态障碍物速度预测因子
-            # 考虑到动态障碍物的运动性，增加预测因子使其更早被感知
-            prediction_factor = 1.5
+            # 4. 动态障碍物速度预测因子 - 根据威胁等级动态调整
+            # 高威胁障碍物需要更早的避障反应
+            prediction_factor = 1.0 + threat_level * 1.5  # 1.0-2.5倍增强（降低）
+            
+            # 5. 侧向避障增强因子 - 优先选择侧向避障而非直接后退
+            # 这有助于保持路径的连贯性
+            lateral_factor = 1.2  # 适度的侧向避障（降低）
+            
+            # 6. 动态障碍物额外增强因子 - 确保动态障碍物斥力足够强
+            dynamic_boost_factor = 1.5  # 适度增强（降低）
             
             # 综合计算斥力大小
-            force_magnitude = base_repulsion * distance_factor * safety_factor * prediction_factor
-            return normalized_dir * force_magnitude
+            force_magnitude = base_repulsion * distance_factor * safety_factor * prediction_factor * lateral_factor * dynamic_boost_factor
+            
+            # 6. 添加侧向避障分量 - 当障碍物直接迎面而来时，增强侧向避障
+            # 这里可以进一步优化，添加垂直于运动方向的斥力分量
+            final_force = normalized_dir * force_magnitude
+            
+            return final_force
         else:
             # 超出影响范围，无斥力
             return np.zeros(2)
     
-    def _compute_braking_distance(self, velocity: np.ndarray) -> float:
-        speed = np.linalg.norm(velocity)
-        return self.config['braking_distance_base'] + self.config['braking_distance_coeff'] * speed
-    
-    def _compute_static_threat_index(self, current_pos: np.ndarray, obstacle_poly: Polygon,
-                                     distance: float, braking_distance: float) -> float:
-        # 使用略大的参照长度，避免中等大小障碍物的 size_factor 过早饱和到 1
-        ref_length = self.config['static_influence_distance'] * 1.8
-        size_factor = min(1.0, obstacle_poly.area / (ref_length ** 2 + 1e-6))
-        distance_factor = math.exp(-distance / max(braking_distance, 1.0))
-        w_size = self.config['threat_size_weight']
-        w_dist = self.config['threat_distance_weight']
-        if (w_size + w_dist) == 0:
+    def _calculate_threat_level(self, current_pos: np.ndarray, obs_pos: np.ndarray, 
+                              obs_size: float, obs_speed: float, obs_direction: np.ndarray) -> float:
+        """
+        计算动态障碍物的威胁等级（优化版）
+        
+        Args:
+            current_pos: 当前位置
+            obs_pos: 障碍物位置
+            obs_size: 障碍物大小
+            obs_speed: 障碍物速度
+            obs_direction: 障碍物方向向量
+            
+        Returns:
+            威胁等级（0-1之间）
+        """
+        # 计算距离
+        dx = obs_pos[0] - current_pos[0]
+        dy = obs_pos[1] - current_pos[1]
+        distance = math.sqrt(dx **2 + dy** 2)
+        
+        # 距离过远，威胁等级为0
+        if distance > self.config['dynamic_influence_distance'] + obs_size:
             return 0.0
-        threat = (w_size * size_factor + w_dist * distance_factor) / (w_size + w_dist)
-        return float(np.clip(threat, 0.0, 1.0))
+        
+        # 计算障碍物与当前位置的方向向量
+        if distance > 0:
+            current_direction = np.array([dx, dy]) / distance
+        else:
+            current_direction = np.array([1.0, 0.0])
+        
+        # 计算方向夹角余弦（越接近1表示方向越一致，威胁越大）
+        direction_cos = max(-1.0, min(1.0, np.dot(obs_direction, current_direction)))
+        
+        # 优化威胁等级组件
+        size_factor = min(1.0, obs_size / 30.0)  # 降低大小因子的分母，更容易达到高值
+        speed_factor = min(1.0, obs_speed / 5.0)   # 降低速度因子的分母，更容易达到高值
+        distance_factor = 1.0 - min(1.0, distance / (self.config['dynamic_influence_distance'] + obs_size))
+        
+        # 方向因子优化：对向移动威胁更大
+        if direction_cos > 0.7:  # 同向移动，威胁较小
+            direction_factor = 0.2
+        elif direction_cos < -0.7:  # 对向移动，威胁很大
+            direction_factor = 1.0
+        else:  # 侧向移动，中等威胁
+            direction_factor = 0.7
+        
+        # 新增：相对速度威胁因子
+        # 如果障碍物朝向当前位置移动，威胁更大
+        relative_speed_factor = speed_factor * max(0.0, -direction_cos)  # 对向时为正，同向时为0
+        
+        # 新增：碰撞概率因子
+        # 基于距离和速度计算碰撞概率，降低时间阈值
+        collision_time = distance / (obs_speed + 1e-6)  # 避免除零
+        if collision_time < 3.0:  # 3秒内可能碰撞（从2秒增加到3秒）
+            collision_probability_factor = 1.0 - min(1.0, collision_time / 3.0)
+        else:
+            collision_probability_factor = 0.0
+        
+        # 综合威胁等级（重新调整权重，让威胁更容易达到高值）
+        threat_level = (
+            self.config['threat_distance_weight'] * distance_factor * 0.25 +  # 距离权重
+            self.config['threat_speed_weight'] * speed_factor * 0.25 +        # 速度权重
+            self.config['threat_direction_weight'] * direction_factor * 0.25 + # 方向权重
+            0.15 * relative_speed_factor +                                    # 相对速度权重
+            0.10 * collision_probability_factor                                 # 碰撞概率权重
+        ) * size_factor
+        
+        # 归一化到0-1范围，使用更宽松的最大值
+        max_threat = 0.25 + 0.25 + 0.25 + 0.15 + 0.10  # 最大可能权重和
+        threat_level = min(1.0, threat_level / max_threat)
+        
+        # 进一步增强威胁等级：对近距离和高速度进行额外加成
+        if distance < 100.0:  # 近距离威胁加成
+            threat_level = min(1.0, threat_level * 1.5)
+        if obs_speed > 4.0:   # 高速威胁加成
+            threat_level = min(1.0, threat_level * 1.3)
+        
+        return threat_level
     
-    def _compute_dynamic_threat_index(self, current_pos: np.ndarray, obs_pos: np.ndarray,
-                                      predicted_pos: np.ndarray, obs_size: float,
-                                      obs_velocity: np.ndarray, distance: float,
-                                      braking_distance: float, velocity: np.ndarray) -> float:
-        ref_length = self.config['dynamic_influence_distance']
-        size_factor = min(1.0, math.pi * (obs_size ** 2) / (math.pi * (ref_length ** 2) + 1e-6))
-        rel_velocity = obs_velocity - velocity
-        rel_speed = np.linalg.norm(rel_velocity)
+    def _calculate_lateral_avoidance_force(self, current_pos: np.ndarray, threat_info: dict, target_pos: np.ndarray) -> np.ndarray:
+        """
+        计算智能侧向避障力
         
-        # 增强速度敏感度：降低参考速度，使快速障碍物更容易达到高威胁
-        speed_norm = min(1.0, rel_speed / 8.0)  # 从10.0降到8.0
+        Args:
+            current_pos: 当前位置
+            threat_info: 威胁障碍物信息
+            target_pos: 目标位置
+            
+        Returns:
+            侧向避障力向量
+        """
+        obs_velocity = threat_info['velocity']
+        obs_position = threat_info['position']
         
-        direction_factor = 0.0
-        if rel_speed > 1e-6 and distance > 1e-6:
-            rel_dir = rel_velocity / rel_speed
-            to_robot = (current_pos - predicted_pos) / distance
-            direction_factor = max(0.0, np.dot(rel_dir, to_robot))
+        # 计算障碍物运动方向的垂直方向（侧向避障方向）
+        obs_speed = np.linalg.norm(obs_velocity)
+        if obs_speed > 1e-6:
+            obs_direction_normalized = obs_velocity / obs_speed
+            # 计算两个垂直方向
+            lateral_direction1 = np.array([-obs_direction_normalized[1], obs_direction_normalized[0]])
+            lateral_direction2 = np.array([obs_direction_normalized[1], -obs_direction_normalized[0]])
+        else:
+            # 如果障碍物静止，使用从障碍物指向当前位置的方向的垂直方向
+            to_current = current_pos - obs_position
+            if np.linalg.norm(to_current) > 1e-6:
+                to_current_normalized = to_current / np.linalg.norm(to_current)
+                lateral_direction1 = np.array([-to_current_normalized[1], to_current_normalized[0]])
+                lateral_direction2 = np.array([to_current_normalized[1], -to_current_normalized[0]])
+            else:
+                lateral_direction1 = np.array([1.0, 0.0])
+                lateral_direction2 = np.array([0.0, 1.0])
         
-        # 增强距离敏感度：使用更陡峭的衰减函数
-        effective_braking = max(braking_distance * 1.5, 1.0)  # 增加有效制动距离
-        distance_factor = math.exp(-distance / effective_braking)
+        # 评估两个侧向方向，选择更接近目标的方向
+        candidate_pos1 = current_pos + lateral_direction1 * 50.0
+        candidate_pos2 = current_pos + lateral_direction2 * 50.0
         
-        # 增加权重，更重视速度和方向因素
-        w_size = self.config['threat_size_weight']
-        w_speed = self.config['threat_speed_weight'] * 1.5  # 增加速度权重
-        w_dir = self.config['threat_direction_weight'] * 1.2  # 增加方向权重
-        w_dist = self.config['threat_distance_weight']
-        total_weight = w_size + w_speed + w_dir + w_dist
-        if total_weight == 0:
-            return 0.0
-        threat = (
-            w_size * size_factor +
-            w_speed * speed_norm +
-            w_dir * direction_factor +
-            w_dist * distance_factor
-        ) / total_weight
-        return float(np.clip(threat, 0.0, 1.0))
-
-    def _enforce_motion_constraints(self, current_pos: np.ndarray, proposed_pos: np.ndarray,
-                                    current_velocity: np.ndarray) -> np.ndarray:
-        displacement = proposed_pos - current_pos
-        disp_norm = np.linalg.norm(displacement)
-        if disp_norm < 1e-6:
-            return proposed_pos
-
-        max_speed = self.config['max_linear_speed']
-        if disp_norm > max_speed:
-            displacement = displacement / disp_norm * max_speed
-
-        target_velocity = displacement
-        if current_velocity is None or len(current_velocity) == 0:
-            current_velocity = np.zeros(2)
-
-        # 线加速度限制
-        acc_vec = target_velocity - current_velocity
-        acc_norm = np.linalg.norm(acc_vec)
-        max_acc = self.config['max_linear_acc']
-        if acc_norm > max_acc:
-            acc_vec = acc_vec / acc_norm * max_acc
-            target_velocity = current_velocity + acc_vec
-
-        speed = np.linalg.norm(target_velocity)
-        if speed > max_speed:
-            target_velocity = target_velocity / speed * max_speed
-            speed = max_speed
-
-        # 角速度/角加速度限制
-        heading = target_velocity / (speed + 1e-9)
-        heading = self._limit_heading_change(heading)
-        target_velocity = heading * speed
-
-        self.prev_velocity = target_velocity
-        self.prev_heading = heading
-
-        return current_pos + target_velocity
-
-    def _limit_heading_change(self, desired_heading: np.ndarray) -> np.ndarray:
-        prev_heading = self.prev_heading
-        dot = float(np.clip(np.dot(prev_heading, desired_heading), -1.0, 1.0))
-        angle_diff = math.acos(dot)
-        cross = prev_heading[0] * desired_heading[1] - prev_heading[1] * desired_heading[0]
-        direction = np.sign(cross) if abs(cross) > 1e-6 else 1.0
-
-        max_ang_vel = self.config['max_angular_velocity']
-        max_ang_acc = self.config['max_angular_acceleration']
-
-        limited_angle = min(angle_diff, max_ang_vel)
-        delta_angle = limited_angle - self.prev_angle_change
-        if abs(delta_angle) > max_ang_acc:
-            limited_angle = self.prev_angle_change + np.sign(delta_angle) * max_ang_acc
-            limited_angle = np.clip(limited_angle, 0.0, max_ang_vel)
-
-        self.prev_angle_change = limited_angle
-
-        if limited_angle < 1e-6:
-            return prev_heading
-
-        rotation_matrix = np.array([
-            [math.cos(limited_angle), -direction * math.sin(limited_angle)],
-            [direction * math.sin(limited_angle),  math.cos(limited_angle)]
-        ])
-        new_heading = rotation_matrix.dot(prev_heading)
-        norm = np.linalg.norm(new_heading)
-        if norm < 1e-6:
-            return prev_heading
-        return new_heading / norm
+        # 计算到目标的距离
+        dist_to_target1 = np.linalg.norm(candidate_pos1 - target_pos)
+        dist_to_target2 = np.linalg.norm(candidate_pos2 - target_pos)
+        
+        # 选择更接近目标的侧向方向
+        if dist_to_target1 < dist_to_target2:
+            preferred_lateral_dir = lateral_direction1
+        else:
+            preferred_lateral_dir = lateral_direction2
+        
+        # 计算侧向避障力的大小
+        # 威胁越高，侧向避障力越大
+        threat_level = threat_info['threat_level']
+        distance = threat_info['distance']
+        
+        # 侧向避障力随威胁等级和距离变化
+        if distance < 80.0:  # 很近的情况
+            lateral_force_magnitude = self.config['repulsive_gain'] * threat_level * 1.2  # 增强到1.2倍
+        elif distance < 150.0:  # 中等距离
+            lateral_force_magnitude = self.config['repulsive_gain'] * threat_level * 0.8  # 增强到0.8倍
+        else:  # 较远距离
+            lateral_force_magnitude = self.config['repulsive_gain'] * threat_level * 0.5  # 增强到0.5倍
+        
+        # 返回侧向避障力
+        return preferred_lateral_dir * lateral_force_magnitude
     
     def discretize_path(self, path, distance_threshold=50.0):
         """

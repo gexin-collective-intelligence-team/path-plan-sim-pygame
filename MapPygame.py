@@ -53,6 +53,7 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from local_planner.local_planner_manager import LocalPlannerManager
 from local_planner.algorithms.apf_local_planner import APFLocalPlanner
+from local_planner.algorithms.apf_local_planner_simple import APFLocalPlannerSimple
 from local_planner.algorithms.dwa_local_planner import DWALocalPlanner
 
 WHITE = (255, 255, 255)
@@ -299,9 +300,9 @@ def draw_line(surface, color, start_pos, end_pos, radius):
         self.local_planner_manager = LocalPlannerManager()
         
         # 注册可用的局部算法
-        self.local_planner_manager.register_algorithm("APF算法", APFLocalPlanner)
+        self.local_planner_manager.register_algorithm("APF算法", APFLocalPlanner)  # 威胁指数改进版
         self.local_planner_manager.register_algorithm("DWA算法", DWALocalPlanner)
-        self.local_planner_manager.register_algorithm("人工势场法", APFLocalPlanner)
+        self.local_planner_manager.register_algorithm("人工势场法", APFLocalPlannerSimple)  # 原始简化版
         self.local_planner_manager.register_algorithm("动态窗口法", DWALocalPlanner)
         
         # 设置默认算法
@@ -631,6 +632,17 @@ def draw_line(surface, color, start_pos, end_pos, radius):
             if self.path_index >= len(self.path) and len(self.path) > 0:
                 self.journey_completed = True
                 self.is_moving = False
+                # 停止定时器，避免重复调用
+                if hasattr(self, 'motion_timer') and self.motion_timer.isActive():
+                    self.motion_timer.stop()
+                    print("⏹️ 航行完成，定时器已停止")
+                # 重置局部规划器状态，避免日志重复打印
+                if hasattr(self, 'local_planner_manager') and self.local_planner_manager.get_current_algorithm() != "无局部算法":
+                    algorithm_name = self.local_planner_manager.get_current_algorithm()
+                    planner = self.local_planner_manager.get_algorithm(algorithm_name)
+                    if planner and hasattr(planner, 'reset_planner'):
+                        planner.reset_planner()
+                        print(f"🚩 到达目标点，{algorithm_name}规划器参数已立即重置")
             return
 
         # 记录当前位置到历史轨迹
@@ -687,6 +699,17 @@ def draw_line(surface, color, start_pos, end_pos, radius):
                 self.history_path.append(self.current_pos.copy())
                 self.is_moving = False
                 self.journey_completed = True
+                # 停止定时器，避免重复调用
+                if hasattr(self, 'motion_timer') and self.motion_timer.isActive():
+                    self.motion_timer.stop()
+                    print("⏹️ 航行完成，定时器已停止")
+                # 重置局部规划器状态，避免日志重复打印
+                if hasattr(self, 'local_planner_manager') and self.local_planner_manager.get_current_algorithm() != "无局部算法":
+                    algorithm_name = self.local_planner_manager.get_current_algorithm()
+                    planner = self.local_planner_manager.get_algorithm(algorithm_name)
+                    if planner and hasattr(planner, 'reset_planner'):
+                        planner.reset_planner()
+                        print(f"🚩 到达目标点，{algorithm_name}规划器参数已立即重置")
                 return
 
         # 更新速度向量（用于下次计算）
@@ -971,12 +994,64 @@ class PygameWidget(QWidget):
         self.snapshot_timer.timeout.connect(self._maybe_save_snapshot)
         self.snapshot_timer.start(500)
 
+    def _reset_realtime_navigation_state(self):
+        """
+        重新启动实时航行前彻底清除上一次航行留下的状态，确保界面与模拟器保持一致。
+        """
+        # 重置运动模拟器内部状态
+        if hasattr(self, 'motion_simulator') and self.motion_simulator:
+            sim = self.motion_simulator
+            if hasattr(sim, 'motion_timer') and sim.motion_timer.isActive():
+                sim.motion_timer.stop()
+
+            # 重置当前局部规划器，避免 goal_reached 等状态遗留到下一次航行
+            if hasattr(sim, 'local_planner_manager'):
+                manager = sim.local_planner_manager
+                current_algo = manager.get_current_algorithm() if hasattr(manager, 'get_current_algorithm') else None
+                if current_algo and current_algo != "无局部算法":
+                    planner = manager.get_algorithm(current_algo)
+                    if planner and hasattr(planner, 'reset_planner'):
+                        planner.reset_planner()
+
+            sim.history_path = []
+            sim.local_path = []
+            sim.path = []
+            sim.path_index = 0
+            sim.current_pos = None
+            sim.target_pos = None
+            sim.velocity = np.zeros(2)
+            if hasattr(sim, 'old_velocity'):
+                sim.old_velocity = np.zeros(2)
+            sim.has_collided = False
+            sim.collision_position = None
+            sim.journey_completed = False
+            sim.is_moving = False
+
+        # 清空动态障碍物尾迹，避免残留轨迹干扰下一次显示
+        for obstacle in getattr(self, 'dynamic_obstacles', []):
+            if hasattr(obstacle, 'trail'):
+                obstacle.trail.clear()
+            if hasattr(obstacle, 'trail_counter'):
+                obstacle.trail_counter = 0
+
+        # 重置快照控制，避免继承上一轮的终点标记
+        self.final_snapshot_taken = False
+        self.snapshot_start_time = None
+
+        # 清理显示图层
+        self.plan_surface.fill(self.back_color)
+        if hasattr(self, 'ship_surface'):
+            self.ship_surface.fill(self.back_color)
+
     def start_realtime_simulation(self):
         """开始实时模拟"""
         # 仅要求起点和终点存在
         if not self.start_point or not self.end_point:
             self.main_window.printf("请先设置起点和终点！")
             return
+
+        # 如果是再次启动，先清掉上一轮航行留下的状态
+        self._reset_realtime_navigation_state()
 
         path_for_motion = None  # 传给运动模拟器的路径
 
@@ -1566,6 +1641,7 @@ class PygameWidget(QWidget):
                 direction = dynamic_obstacle.direction
                 speed = dynamic_obstacle.speed
                 size = dynamic_obstacle.size
+                bounce = getattr(dynamic_obstacle, 'bounce', True)  # 获取反弹属性，默认为True
                 # 创建动态障碍物的GeoJSON对象
                 dynamic_feature = geojson.Feature(
                     geometry=geojson.Point(position),
@@ -1575,7 +1651,8 @@ class PygameWidget(QWidget):
                         "shape":shape,
                         "direction": direction,
                         "speed": speed,
-                        "size": size
+                        "size": size,
+                        "bounce": bounce  # 添加反弹属性
                     }
                 )
                 features.append(dynamic_feature)
@@ -1596,7 +1673,17 @@ class PygameWidget(QWidget):
     def update_dynamic_obstacles(self):
         """
         更新动态障碍物位置，检测碰撞并处理反弹或消失。
+        只在实时航行时才更新动态障碍物位置。
         """
+        # 检查是否正在进行实时航行
+        is_realtime_running = False
+        if hasattr(self, 'motion_simulator') and self.motion_simulator:
+            is_realtime_running = getattr(self.motion_simulator, 'is_moving', False)
+        
+        # 如果不在实时航行状态，则不更新动态障碍物位置
+        if not is_realtime_running:
+            return
+        
         # 如果船舶已经发生碰撞，则保持当前动态障碍物状态，不再更新其位置
         if hasattr(self, 'motion_simulator') and getattr(self.motion_simulator, 'has_collided', False):
             return
@@ -1786,8 +1873,9 @@ class PygameWidget(QWidget):
                 direction = tuple(properties.get('direction', (1, 0)))  # 默认方向为 (1, 0)
                 speed = properties.get('speed', 1.0)  # 默认速度为 1.0
                 size = properties.get('size', 20.0)  # 默认大小为 5.0
+                bounce = properties.get('bounce', True)  # 读取反弹属性，默认为True
 
-                dynamic_obstacle = DynamicObstacle(shape, position, direction, speed, size)
+                dynamic_obstacle = DynamicObstacle(shape, position, direction, speed, size, bounce)
                 dynamic_obstacles.append(dynamic_obstacle)
 
         self.obstacles = obstacles
@@ -1836,10 +1924,24 @@ class PygameWidget(QWidget):
             pygame.draw.circle(self.obs_surface, self.obs_color, pos, self.obs_radius)
         elif event.button() == Qt.RightButton:
             pos = (event.pos().x(), event.pos().y())
-            if self.obstacles:
+            if self.obstacles or self.dynamic_obstacles:
                 # 判断起点存在且不在障碍物内部
                 if self.start_point is None:
-                    if all(not shapely.Polygon(item).contains(shapely.Point(list(pos))) for item in self.obstacles):
+                    # 检查静态障碍物
+                    static_obstacle_check = True
+                    if self.obstacles:
+                        static_obstacle_check = all(not shapely.Polygon(item).contains(shapely.Point(list(pos))) for item in self.obstacles)
+                    
+                    # 检查动态障碍物
+                    dynamic_obstacle_check = True
+                    if self.dynamic_obstacles:
+                        for dyn_obs in self.dynamic_obstacles:
+                            if hasattr(dyn_obs, 'contains_point'):
+                                if dyn_obs.contains_point(pos):
+                                    dynamic_obstacle_check = False
+                                    break
+                    
+                    if static_obstacle_check and dynamic_obstacle_check:
                         self.start_point = pos
                         print(self.start_point)
                         pygame.draw.circle(self.point_surface, (0, 255, 0), pos, self.point_radius)
@@ -1848,7 +1950,21 @@ class PygameWidget(QWidget):
                         self.main_window.text_result.append("起点不能设置在障碍物内部")
                 else:
                     if self.start_point and self.start_point != pos and self.end_point is None:
-                        if all(not shapely.Polygon(item).contains(shapely.Point(list(pos))) for item in self.obstacles):
+                        # 检查静态障碍物
+                        static_obstacle_check = True
+                        if self.obstacles:
+                            static_obstacle_check = all(not shapely.Polygon(item).contains(shapely.Point(list(pos))) for item in self.obstacles)
+                        
+                        # 检查动态障碍物
+                        dynamic_obstacle_check = True
+                        if self.dynamic_obstacles:
+                            for dyn_obs in self.dynamic_obstacles:
+                                if hasattr(dyn_obs, 'contains_point'):
+                                    if dyn_obs.contains_point(pos):
+                                        dynamic_obstacle_check = False
+                                        break
+                        
+                        if static_obstacle_check and dynamic_obstacle_check:
                             self.end_point = pos
                             print(self.end_point)
                             pygame.draw.circle(self.point_surface, (255, 0, 0), pos, self.point_radius)
@@ -1856,7 +1972,7 @@ class PygameWidget(QWidget):
                         else:
                             self.main_window.text_result.append("终点不能设置在障碍物内部")
             else:
-                self.main_window.text_result.append("请添加障碍物后再设置起始点")
+                self.main_window.text_result.append("请添加静态障碍物或动态障碍物后再设置起始点")
 
     # 鼠标移动事件处理
     def mouseMoveEvent(self, event):

@@ -75,3 +75,30 @@ class DynamicObstacle:
         else:
             raise ValueError(f"未知形状: {self.shape}")
 
+    def contains_point(self, point):
+        """
+        检查给定点是否在动态障碍物内部
+        :param point: tuple(float, float) or shapely.Point, 要检查的点
+        :return: bool, 点是否在障碍物内部
+        """
+        if isinstance(point, tuple):
+            x, y = point
+        elif hasattr(point, 'x') and hasattr(point, 'y'):
+            x, y = point.x, point.y
+        else:
+            raise ValueError("点必须是tuple格式或shapely.Point对象")
+        
+        obstacle_x, obstacle_y = self.position
+        
+        if self.shape == "圆形":
+            # 圆形：计算距离
+            distance = math.sqrt((x - obstacle_x) ** 2 + (y - obstacle_y) ** 2)
+            return distance <= self.size
+        elif self.shape == "正方形":
+            # 正方形：检查点是否在正方形内
+            half_size = self.size / 2
+            return (obstacle_x - half_size <= x <= obstacle_x + half_size and 
+                    obstacle_y - half_size <= y <= obstacle_y + half_size)
+        else:
+            raise ValueError(f"未知形状: {self.shape}")
+
