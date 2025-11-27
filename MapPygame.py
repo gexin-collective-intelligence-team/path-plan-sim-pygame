@@ -300,9 +300,9 @@ def draw_line(surface, color, start_pos, end_pos, radius):
         self.local_planner_manager = LocalPlannerManager()
         
         # 注册可用的局部算法
-        self.local_planner_manager.register_algorithm("APF算法", APFLocalPlanner)  # 威胁指数改进版
+        self.local_planner_manager.register_algorithm("TAPF", APFLocalPlanner)  # 威胁指数改进版
         self.local_planner_manager.register_algorithm("DWA算法", DWALocalPlanner)
-        self.local_planner_manager.register_algorithm("人工势场法", APFLocalPlannerSimple)  # 原始简化版
+        self.local_planner_manager.register_algorithm("原APF", APFLocalPlannerSimple)  # 原始简化版
         self.local_planner_manager.register_algorithm("动态窗口法", DWALocalPlanner)
         
         # 设置默认算法

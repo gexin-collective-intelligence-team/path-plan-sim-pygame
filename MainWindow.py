@@ -998,9 +998,9 @@ class Ui_MainWindow(object):
         self.combo_local_algorithm.setGeometry(QtCore.QRect(920, 454, 120, 25))
         self.combo_local_algorithm.setObjectName("combo_local_algorithm")
         self.combo_local_algorithm.addItem("无局部算法")
-        self.combo_local_algorithm.addItem("APF算法")
+        self.combo_local_algorithm.addItem("TAPF")
         self.combo_local_algorithm.addItem("DWA算法")  # 预留，待实现
-        self.combo_local_algorithm.addItem("人工势场法")
+        self.combo_local_algorithm.addItem("原APF")
         self.combo_local_algorithm.addItem("动态窗口法")  # 预留，待实现
         self.combo_local_algorithm.setCurrentIndex(0)  # 默认选择无局部算法
         # self.pushButton_dynamic_ob.setStyleSheet("background-color: yellow;")  # 设置背景色以便观察
