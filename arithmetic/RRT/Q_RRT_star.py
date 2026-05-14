@@ -38,9 +38,8 @@ class Q_RRT_star:
             )
             rand_area = rand_area if rand_area is not None else (0, self.width, 0, self.height)
             project_defaults = {
-                "robot_radius": 2.0,
-                "safety_margin": 2.0,
-                "formation_radius": 0.0,
+                "agent_radius": 2.0,
+                "clearance": 2.0,
                 "maxIterAuto": 2200,
                 "maxSampleAttempts": 80,
                 "patience": 90,
@@ -49,6 +48,8 @@ class Q_RRT_star:
 
         self.start = start
         self.goal = goal
+        self._start_xy = self._as_xy(start)
+        self._goal_xy = self._as_xy(goal)
         self.obstacle_list = obstacle_list if obstacle_list is not None else []
         self.params = params if params is not None else {}
         self.node_list = None
@@ -112,11 +113,19 @@ class Q_RRT_star:
         self.r_min = 2.0 * self.step_min
         self.r_max = min(self.gamma_rrt, 0.35 * self.map_diag)
 
-    def rrt_star_planning(self):
+    def plan_path(self):
+        """
+        只执行 Q-RRT* 路径规划，不做任何绘图。
+
+        Returns:
+            path: [[x, y], ...] 或 None
+            elapsed: 规划耗时
+            stats: 规划统计信息
+        """
         start_time = time.time()
 
-        self.start = self._make_node(self.start[0], self.start[1])
-        self.goal = self._make_node(self.goal[0], self.goal[1])
+        self.start = self._make_node(self._start_xy[0], self._start_xy[1])
+        self.goal = self._make_node(self._goal_xy[0], self._goal_xy[1])
         self.node_list = [self.start]
         self.start_to_goal_distance = self.line_cost(self.start, self.goal)
 
@@ -130,25 +139,51 @@ class Q_RRT_star:
 
         # 检查起点和终点是否合法
         if self.check_sample_collision([self.start.x, self.start.y]):
+            elapsed = time.time() - start_time
+            stats = {
+                'success': False,
+                'reason': 'start_in_obstacle_or_clearance',
+                'sampling_count': 0,
+                'node_count': len(self.node_list),
+                'path_point_count': 0,
+                'path_length': None,
+                'first_path_found_iter': None,
+            }
             print("路径规划失败：起点位于障碍物或安全膨胀区域内")
-            return None, time.time() - start_time
+            return None, elapsed, stats
 
         if self.check_sample_collision([self.goal.x, self.goal.y]):
+            elapsed = time.time() - start_time
+            stats = {
+                'success': False,
+                'reason': 'goal_in_obstacle_or_clearance',
+                'sampling_count': 0,
+                'node_count': len(self.node_list),
+                'path_point_count': 0,
+                'path_length': None,
+                'first_path_found_iter': None,
+            }
             print("路径规划失败：终点位于障碍物或安全膨胀区域内")
-            return None, time.time() - start_time
+            return None, elapsed, stats
 
         path = None
         lastPathLength = float('inf')
         sampling_count = 0
 
         no_improve_count = 0
+        iterations_after_first_path = 0
+        iterations_since_best_path = 0
         first_path_found_iter = None
 
         for i in range(self.max_iter):
+            improved_this_iter = False
 
             rnd = self.sample_with_collision_check()
 
             if rnd is None:
+                if path is not None:
+                    iterations_after_first_path += 1
+                    iterations_since_best_path += 1
                 continue
 
             sampling_count += 1
@@ -175,7 +210,7 @@ class Q_RRT_star:
                 parentInds = self.find_ancestry_nodes(nearInds)
 
                 # 去重，避免重复候选父节点
-                nearparentInds = list(set(nearInds + parentInds))
+                nearparentInds = self._merge_parent_candidates(nearInds, parentInds)
 
                 # 选择父节点
                 newNode = self.choose_parent(newNode, nearparentInds)
@@ -208,6 +243,9 @@ class Q_RRT_star:
 
                             first_path_found_iter = i
                             no_improve_count = 0
+                            iterations_after_first_path = 0
+                            iterations_since_best_path = 0
+                            improved_this_iter = True
 
                             print(
                                 f"首次找到路径：第 {i + 1} 次迭代，"
@@ -223,6 +261,8 @@ class Q_RRT_star:
                             self.current_best_path_len = lastPathLength
 
                             no_improve_count = 0
+                            iterations_since_best_path = 0
+                            improved_this_iter = True
 
                             print(
                                 f"路径更新：第 {i + 1} 次迭代，"
@@ -233,13 +273,21 @@ class Q_RRT_star:
                         else:
                             no_improve_count += 1
 
+            if path is not None and not improved_this_iter:
+                iterations_after_first_path += 1
+                iterations_since_best_path += 1
+
             # 提前终止判断：必须放在 for 循环内部，但不能放在 if rnd 的深层缩进里
             if self.early_stop and path is not None:
-                if no_improve_count >= self.patience:
+                enough_optimization = iterations_after_first_path >= self.min_optimize_iterations_after_first_path
+                goal_updates_stalled = no_improve_count >= self.patience
+                search_stalled = iterations_since_best_path >= self.max_iterations_without_improvement
+                if enough_optimization and (goal_updates_stalled or search_stalled):
                     print(
                         f"提前终止：第 {i + 1} 次迭代停止，"
                         f"首次找到路径迭代={first_path_found_iter + 1}，"
-                        f"连续 {no_improve_count} 次无明显改善"
+                        f"首条路径后优化{iterations_after_first_path}轮，"
+                        f"连续{iterations_since_best_path}轮无明显改善"
                     )
                     break
 
@@ -247,11 +295,22 @@ class Q_RRT_star:
         planning_time = end_time - start_time
 
         if path:
-            # 路径后处理：剪枝 + 重采样
+            # 路径后处理：剪枝 + 安全性复检
             if self.use_path_post_process:
                 path = self.post_process_path(path)
 
             path_total_length = self.get_path_len(path)
+            stats = {
+                'success': True,
+                'reason': None,
+                'sampling_count': sampling_count,
+                'node_count': len(self.node_list),
+                'path_point_count': len(path),
+                'path_length': path_total_length,
+                'first_path_found_iter': first_path_found_iter,
+                'iterations': i + 1 if 'i' in locals() else 0,
+                'elapsed': planning_time,
+            }
 
             print(
                 f"路径规划完成！规划时间：{planning_time:.4f} 秒，"
@@ -261,20 +320,39 @@ class Q_RRT_star:
                 f"路径总长度：{path_total_length:.2f}"
             )
         else:
+            stats = {
+                'success': False,
+                'reason': 'no_path_found',
+                'sampling_count': sampling_count,
+                'node_count': len(self.node_list),
+                'path_point_count': 0,
+                'path_length': None,
+                'first_path_found_iter': first_path_found_iter,
+                'iterations': i + 1 if 'i' in locals() else 0,
+                'elapsed': planning_time,
+            }
             print(
                 f"路径规划失败！规划时间：{planning_time:.4f} 秒，"
                 f"采样次数：{sampling_count}，"
                 f"节点数：{len(self.node_list)}"
             )
 
-        return path, planning_time
+        return path, planning_time, stats
+
+    def rrt_star_planning(self):
+        """
+        兼容旧调用：只返回 path 和 elapsed。
+        """
+        path, elapsed, _ = self.plan_path()
+        return path, elapsed
 
     def plan(self, plan_surface):
         """
         适配项目统一接口：
         Q_RRT_star(mapdata).plan(plan_surface) -> ([point...], elapsed_seconds)
         """
-        path, elapsed = self.rrt_star_planning()
+        path, elapsed, stats = self.plan_path()
+        self.last_plan_stats = stats
         if not path:
             return [], elapsed
 
@@ -304,6 +382,12 @@ class Q_RRT_star:
         node.parent = parent
         node.father = None
         return node
+
+    @staticmethod
+    def _as_xy(value):
+        if hasattr(value, 'x') and hasattr(value, 'y'):
+            return (value.x, value.y)
+        return (value[0], value[1])
 
     def _init_surface_metrics(self):
         """从项目真实障碍物图层提取密度和距离场，用于自适应参数。"""
@@ -412,21 +496,30 @@ class Q_RRT_star:
         # ==============================
         # 1. 安全距离参数
         # ==============================
-        self.robot_radius = self.params.get('robot_radius', 0.01 * self.map_diag)
-        self.safety_margin = self.params.get('safety_margin', 0.01 * self.map_diag)
-
-        # 编队半径：用于全局路径规划的额外安全膨胀
-        self.formation_radius = self.params.get('formation_radius', 0.0)
-
-        # 编队安全权重：避免完整编队半径导致全局路径过度保守
-        self.formation_safety_weight = self.params.get('formation_safety_weight', 0.5)
-
-        # 全局规划安全距离 = 机器人半径 + 安全余量 + 部分编队半径
-        self.safe_clearance = (
-                self.robot_radius
-                + self.safety_margin
-                + self.formation_safety_weight * self.formation_radius
+        self.agent_radius = self.params.get(
+            'agent_radius',
+            self.params.get('robot_radius', 0.01 * self.map_diag)
         )
+        self.clearance = self.params.get(
+            'clearance',
+            self.params.get('safety_margin', 0.01 * self.map_diag)
+        )
+
+        if 'extra_inflation' in self.params:
+            self.extra_inflation = self.params['extra_inflation']
+        else:
+            formation_radius = self.params.get('formation_radius', 0.0)
+            formation_safety_weight = self.params.get('formation_safety_weight', 0.5)
+            self.extra_inflation = formation_radius * formation_safety_weight
+
+        self.safe_clearance = self.params.get(
+            'safe_clearance',
+            self.agent_radius + self.clearance + self.extra_inflation
+        )
+
+        # 兼容旧代码/旧参数命名
+        self.robot_radius = self.agent_radius
+        self.safety_margin = self.clearance
 
         # ==============================
         # 2. 自适应步长参数
@@ -535,6 +628,14 @@ class Q_RRT_star:
         self.patience = self.params.get(
             'patience',
             max(40, int(0.12 * self.max_iter))
+        )
+        self.min_optimize_iterations_after_first_path = self.params.get(
+            'minOptimizeIterationsAfterFirstPath',
+            max(150, int(0.15 * self.max_iter))
+        )
+        self.max_iterations_without_improvement = self.params.get(
+            'maxIterationsWithoutImprovement',
+            max(self.patience * 3, int(0.25 * self.max_iter))
         )
 
     def sample_with_collision_check(self):
@@ -899,9 +1000,12 @@ class Q_RRT_star:
 
     def find_ancestry_nodes(self, nearInds):
         X_parent = []
+        seen = set()
 
         # 遍历邻域节点索引集Qn
         for q_index in nearInds:
+            if q_index is None or q_index < 0 or q_index >= len(self.node_list):
+                continue
             current_depth = 0
             current_index = q_index
 
@@ -917,38 +1021,46 @@ class Q_RRT_star:
                     break
 
             # 如果查询深度达标，则将当前节点索引添加到Qparent
-            if current_depth == self.d_ancestor:
+            if current_depth == self.d_ancestor and current_index not in seen:
+                seen.add(current_index)
                 X_parent.append(current_index)
 
         return X_parent
+
+    def _merge_parent_candidates(self, nearInds, parentInds):
+        candidates = []
+        seen = set()
+        for idx in nearInds + parentInds:
+            if idx is None or idx < 0 or idx >= len(self.node_list):
+                continue
+            if idx in seen:
+                continue
+            seen.add(idx)
+            candidates.append(idx)
+        return candidates
 
     def choose_parent(self, newNode, nearInds):
         # 判断节点范围内的集合列表是否为空，为空证明无候选节点 直接返回原节点
         if len(nearInds) == 0:
             return newNode
 
-        dList = []
+        candidates = []
         for i in nearInds:
             dx = newNode.x - self.node_list[i].x
             dy = newNode.y - self.node_list[i].y
             d = math.hypot(dx, dy)
+            candidates.append((self.node_list[i].cost + d, i, d, dx, dy))
+
+        candidates.sort(key=lambda item: item[0])
+        for minCost, minInd, d, dx, dy in candidates:
             theta = math.atan2(dy, dx)
-            if self.check_collision(self.node_list[i], theta, d):
-                dList.append(self.node_list[i].cost + d)
-            else:
-                dList.append(float('inf'))
+            if self.check_collision(self.node_list[minInd], theta, d):
+                # 更新节点代价以及父节点
+                newNode.cost = minCost
+                newNode.parent = minInd
+                return newNode
 
-        minCost = min(dList)
-        minInd = nearInds[dList.index(minCost)]
-
-        # 判断新的父节点是否是无穷大，如果是无穷大就碰撞了
-        if minCost == float('inf'):
-            print("min cost is inf")
-            return newNode
-
-        # 更新节点代价以及父节点
-        newNode.cost = minCost
-        newNode.parent = minInd
+        print("min cost is inf")
         return newNode
 
     def check_collision(self, nearNode, theta, d):
@@ -958,34 +1070,49 @@ class Q_RRT_star:
 
     def rewire(self, newNode, nearInds):
         """
-        重连阶段：让附近节点尝试连接到 newNode 的父节点，而不是 newNode 本身
+        重连阶段：附近节点同时尝试连接 newNode 和 newNode 的父节点。
         """
-        # 如果 newNode 没有父节点，无法进行重连
-        if newNode.parent is None:
+        if not self.node_list or self.node_list[-1] is not newNode:
             return
 
-        parent_index = newNode.parent
-        parent_node = self.node_list[parent_index]
+        new_node_index = len(self.node_list) - 1
+        candidate_parents = [(new_node_index, newNode)]
+        if newNode.parent is not None:
+            candidate_parents.append((newNode.parent, self.node_list[newNode.parent]))
 
         for i in nearInds:
+            if i == new_node_index:
+                continue
             nearNode = self.node_list[i]
+            best_parent_index = None
+            best_cost = nearNode.cost
+            best_distance = None
+            best_dx = None
+            best_dy = None
 
-            # 计算 父节点 → 邻域节点 的距离
-            dx = nearNode.x - parent_node.x
-            dy = nearNode.y - parent_node.y
-            d = math.hypot(dx, dy)
-
-            # 经过父节点到达邻域节点的候选代价
-            s_cost = parent_node.cost + d
+            for parent_index, parent_node in candidate_parents:
+                if i == parent_index:
+                    continue
+                dx = nearNode.x - parent_node.x
+                dy = nearNode.y - parent_node.y
+                d = math.hypot(dx, dy)
+                candidate_cost = parent_node.cost + d
+                if candidate_cost < best_cost:
+                    best_parent_index = parent_index
+                    best_cost = candidate_cost
+                    best_distance = d
+                    best_dx = dx
+                    best_dy = dy
 
             # 如果候选代价更小，检查碰撞
-            if nearNode.cost > s_cost:
-                theta = math.atan2(dy, dx)  # 父节点指向邻域节点的方向
+            if best_parent_index is not None:
+                theta = math.atan2(best_dy, best_dx)
+                parent_node = self.node_list[best_parent_index]
 
-                # 检查 父节点 → 邻域节点 这条线段是否无碰撞
-                if self.check_collision(parent_node, theta, d):
-                    nearNode.parent = parent_index
-                    nearNode.cost = s_cost
+                # 检查候选父节点 → 邻域节点 这条线段是否无碰撞
+                if self.check_collision(parent_node, theta, best_distance):
+                    nearNode.parent = best_parent_index
+                    nearNode.cost = best_cost
 
                     # 关键修改：递归更新 nearNode 的所有后代节点 cost
                     self.propagate_cost_to_leaves(i)
@@ -1013,8 +1140,7 @@ class Q_RRT_star:
         """
         路径后处理：
         1. 路径剪枝；
-        2. 等间距重采样；
-        3. 安全性复检。
+        2. 安全性复检。
         """
         if path is None or len(path) <= 2:
             return path
@@ -1025,17 +1151,14 @@ class Q_RRT_star:
         # 1. 剪枝
         pruned_path = self.prune_path(path)
 
-        # 2. 重采样
-        resampled_path = self.resample_path(pruned_path)
-
-        # 3. 安全性检查
-        if self.is_path_collision_free(resampled_path):
-            new_len = self.get_path_len(resampled_path)
+        # 2. 安全性检查
+        if self.is_path_collision_free(pruned_path):
+            new_len = self.get_path_len(pruned_path)
             print(
-                f"路径后处理完成：点数 {raw_points} -> {len(resampled_path)}，"
+                f"路径后处理完成：点数 {raw_points} -> {len(pruned_path)}，"
                 f"长度 {raw_len:.2f} -> {new_len:.2f}"
             )
-            return resampled_path
+            return pruned_path
 
         print("路径后处理结果存在碰撞，保留原始路径")
         return path
@@ -1072,48 +1195,6 @@ class Q_RRT_star:
             i = j
 
         return pruned_path
-
-    def resample_path(self, path, step=None):
-        """
-        对路径进行等间距重采样。
-        作用：
-        1. 避免剪枝后路径点过少；
-        2. 保证 leader 沿路径运动时航向变化更平稳；
-        3. 保证 main.py 中 future_point 的计算更稳定。
-        """
-        if path is None or len(path) <= 1:
-            return path
-
-        if step is None:
-            step = self.path_sample_step
-
-        resampled_path = [path[0]]
-
-        for i in range(len(path) - 1):
-            x1, y1 = path[i]
-            x2, y2 = path[i + 1]
-
-            dx = x2 - x1
-            dy = y2 - y1
-            dist = math.hypot(dx, dy)
-
-            if dist < 1e-6:
-                continue
-
-            # 当前线段至少分成 1 段
-            n_segment = max(1, int(math.ceil(dist / step)))
-
-            for k in range(1, n_segment + 1):
-                t = k / n_segment
-                new_x = x1 + t * dx
-                new_y = y1 + t * dy
-
-                # 避免重复点
-                last_x, last_y = resampled_path[-1]
-                if math.hypot(new_x - last_x, new_y - last_y) > 1e-6:
-                    resampled_path.append([new_x, new_y])
-
-        return resampled_path
 
     def is_path_collision_free(self, path):
         """

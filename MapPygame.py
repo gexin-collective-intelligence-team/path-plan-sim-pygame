@@ -1266,19 +1266,6 @@ class PygameWidget(QWidget):
         self.search = Q_RRT_star(self)
         self.result, time = self.search.plan(self.plan_surface)
 
-        if self.result is not None and len(self.result) > 1:
-            unsafe_segments = []
-            for i in range(len(self.result) - 1):
-                if self.search.collision(
-                        (self.result[i].x, self.result[i].y),
-                        (self.result[i + 1].x, self.result[i + 1].y)
-                ):
-                    unsafe_segments.append(i)
-            if unsafe_segments:
-                print(f"⚠️ Q-RRT*路径复检发现{len(unsafe_segments)}段碰撞，保留原始规划结果但不再做项目通用稀疏优化。")
-            else:
-                print(f"✅ Q-RRT*路径复检通过，路径点数：{len(self.result)}")
-
         if self.result:
             for k in range(len(self.result) - 1):
                 pygame.draw.line(self.plan_surface, (0, 100, 255), (self.result[k].x, self.result[k].y),
@@ -1380,13 +1367,7 @@ class PygameWidget(QWidget):
         for point in self.result:
             track.append((point.x, point.y))
 
-        # 转换原始路径为坐标列表
-        original_track = []
-        if original_path is not None:
-            for point in original_path:
-                original_track.append((point.x, point.y))
-
-        return track, time, original_track
+        return track, time
     def startApfRrt_dyn(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
