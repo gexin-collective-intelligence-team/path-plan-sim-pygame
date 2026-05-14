@@ -363,7 +363,7 @@ class Ui_MainWindow(object):
     def select_arithmetic(self, MainWindow, grid_widget):
         self.loginWindow_new = None
         MainWindow.setObjectName("MainWindow")
-        MainWindow.resize(800, 250)
+        MainWindow.resize(880, 250)
         # 创建选择算法标签
         self.label_analyse = QLabel("选择算法:", MainWindow)
         self.label_analyse.setGeometry(30, 30, 80, 30)  # 设置标签位置和大小
@@ -394,21 +394,25 @@ class Ui_MainWindow(object):
         radio_button_RRTStar = QRadioButton("RRTStar", MainWindow)
         radio_button_RRTStar.setGeometry(430, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_RRTStar)
+        # Q-RRT*
+        radio_button_QRRTStar = QRadioButton("Q-RRT*", MainWindow)
+        radio_button_QRRTStar.setGeometry(500, 30, 80, 30)
+        radio_button_group.addButton(radio_button_QRRTStar)
         # BiRRT
         radio_button_BiRRT = QRadioButton("BiRRT", MainWindow)
-        radio_button_BiRRT.setGeometry(500, 30, 80, 30)  # 设置单选按钮位置和大小
+        radio_button_BiRRT.setGeometry(570, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_BiRRT)
         # dynapfrrt
         radio_button_RRTapf_dyn = QRadioButton("RRTAPFdyn", MainWindow)
-        radio_button_RRTapf_dyn.setGeometry(560, 30, 80, 30)  # 设置单选按钮位置和大小
+        radio_button_RRTapf_dyn.setGeometry(630, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_RRTapf_dyn)
         # dbvsapfrrt
         radio_button_dbvspRRT = QRadioButton("dbvspRRT", MainWindow)
-        radio_button_dbvspRRT.setGeometry(620, 30, 80, 30)  # 设置单选按钮位置和大小
+        radio_button_dbvspRRT.setGeometry(690, 30, 80, 30)  # 设置单选按钮位置和大小
         radio_button_group.addButton(radio_button_dbvspRRT)
         # Cost-Aware RRT
         radio_button_costRRT = QRadioButton("CostRRT", MainWindow)
-        radio_button_costRRT.setGeometry(700, 30, 80, 30)  # 设置位置和大小（x根据你的界面布局可调整）
+        radio_button_costRRT.setGeometry(760, 30, 80, 30)  # 设置位置和大小（x根据你的界面布局可调整）
         radio_button_group.addButton(radio_button_costRRT)
         # 保存结果部分
         label_result = QLabel("是否保存结果:", MainWindow)
@@ -470,7 +474,7 @@ class Ui_MainWindow(object):
         label_notice.setGeometry(80, 210, 150, 30)  # 设置标签位置和大小
 
         def on_button_click():
-            if not radio_button_astar.isChecked() and not radio_button_rrt.isChecked() and not radio_button_apf.isChecked() and not radio_button_RRTapf and not radio_button_PRM and not radio_button_BiRRT and not radio_button_RRTStar and not radio_button_RRTapf_dyn and not radio_button_dbvspRRT and not radio_button_costRRT :
+            if not radio_button_astar.isChecked() and not radio_button_rrt.isChecked() and not radio_button_apf.isChecked() and not radio_button_RRTapf.isChecked() and not radio_button_PRM.isChecked() and not radio_button_BiRRT.isChecked() and not radio_button_RRTStar.isChecked() and not radio_button_QRRTStar.isChecked() and not radio_button_RRTapf_dyn.isChecked() and not radio_button_dbvspRRT.isChecked() and not radio_button_costRRT.isChecked():
                 label_notice.setText("请选择规划路径所用算法！")
                 return
             # 检测路径是否合法
@@ -505,6 +509,9 @@ class Ui_MainWindow(object):
                 elif radio_button_RRTStar.isChecked():
                     obstacle_overlap = "RRTStar"
                     track, time = grid_widget.startRRTStar()
+                elif radio_button_QRRTStar.isChecked():
+                    obstacle_overlap = "Q-RRTStar"
+                    track, time = grid_widget.startQRRTStar()
                 elif radio_button_BiRRT.isChecked():
                     obstacle_overlap = "BiRRT"
                     track, time = grid_widget.startBiRRT()
@@ -1437,6 +1444,9 @@ class Ui_MainWindow(object):
             elif self.combo_arithmetic.currentText() == "PRM":
                 self.printf("启动PRM算法！！！")
                 self.grid_widget.startPRm()
+            elif self.combo_arithmetic.currentText() == "Q-RRT*":
+                self.printf("启动Q-RRT*算法！！！")
+                self.grid_widget.startQRRTStar()
 
     def ori_end_input(self):  # 输入起始点终点函数
         coordinate = self.text_input.text()

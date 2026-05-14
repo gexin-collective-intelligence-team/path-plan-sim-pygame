@@ -32,6 +32,7 @@ from arithmetic.APFRRT.dbvsAPFRRT import dbvsAPFRRT_dyn
 from arithmetic.Astar.Map import Map
 from arithmetic.Astar.astar import astar
 from arithmetic.RRT.BiRRT import BiRrt
+from arithmetic.RRT.Q_RRT_star import Q_RRT_star
 from arithmetic.RRT.RRTstar import RrtStar
 from arithmetic.RRT.costRRT import Cost_Rrt
 from arithmetic.RRT.rrt import Rrt
@@ -86,6 +87,7 @@ def batch_run(self, algo: str = "PRM", runs: int = 50, out_dir: str = "runs",
         "DbvsAPF-RRT-dyn": self.startDbvsPRrt,
         "RRT": self.startRtt,
         "RRT*": self.startRRTStar,
+        "Q-RRT*": self.startQRRTStar,
         "BiRRT": self.startBiRRT,
         "CostRRT": self.startcostRrt,
     }
@@ -1256,6 +1258,37 @@ class PygameWidget(QWidget):
             x = point.x
             y = point.y
             track.append((x, y))
+        return track, time
+    def startQRRTStar(self):
+        self.plan_surface.fill(self.back_color)
+        self.result = None
+        self.spline_path = None
+        self.search = Q_RRT_star(self)
+        self.result, time = self.search.plan(self.plan_surface)
+
+        if self.result is not None and len(self.result) > 1:
+            unsafe_segments = []
+            for i in range(len(self.result) - 1):
+                if self.search.collision(
+                        (self.result[i].x, self.result[i].y),
+                        (self.result[i + 1].x, self.result[i + 1].y)
+                ):
+                    unsafe_segments.append(i)
+            if unsafe_segments:
+                print(f"⚠️ Q-RRT*路径复检发现{len(unsafe_segments)}段碰撞，保留原始规划结果但不再做项目通用稀疏优化。")
+            else:
+                print(f"✅ Q-RRT*路径复检通过，路径点数：{len(self.result)}")
+
+        if self.result:
+            for k in range(len(self.result) - 1):
+                pygame.draw.line(self.plan_surface, (0, 100, 255), (self.result[k].x, self.result[k].y),
+                                 (self.result[k + 1].x, self.result[k + 1].y), 3)
+            for k in self.result:
+                pygame.draw.circle(self.plan_surface, (0, 100, 255), (int(k.x), int(k.y)), 3)
+
+        track = []
+        for p in self.result or []:
+            track.append((p.x, p.y))
         return track, time
     def startBiRRT(self):
         self.plan_surface.fill(self.back_color)
