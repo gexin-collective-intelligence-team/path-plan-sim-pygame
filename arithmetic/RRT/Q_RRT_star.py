@@ -4,7 +4,6 @@ import time
 import numpy as np
 import pygame
 from scipy.spatial import cKDTree
-from scipy.ndimage import distance_transform_edt
 from PyQt5.QtWidgets import QApplication
 
 from .Node import point
@@ -16,7 +15,8 @@ class Q_RRT_star:
     def __init__(self, start, goal=None, obstacle_list=None, rand_area=None, params=None):
         self.mapdata = None
         self.surface_obstacle = None
-        self.obstacle_distance_map = None
+        self.obstacle_mask = None
+        self.obstacle_kdtree = None
         self.surface_obstacle_density = None
         self.width = None
         self.height = None
@@ -36,10 +36,11 @@ class Q_RRT_star:
             obstacle_list = obstacle_list if obstacle_list is not None else self._obstacles_to_circles(
                 raw_obstacles
             )
-            rand_area = rand_area if rand_area is not None else (0, self.width, 0, self.height)
+            rand_area = rand_area if rand_area is not None else (0, self.width - 1, 0, self.height - 1)
             project_defaults = {
-                "agent_radius": 2.0,
-                "clearance": 2.0,
+                "agent_radius": 0.0,
+                "clearance": 0.0,
+                "extra_inflation": 0.0,
                 "maxIterAuto": 2200,
                 "maxSampleAttempts": 80,
                 "patience": 90,
@@ -174,8 +175,17 @@ class Q_RRT_star:
         iterations_after_first_path = 0
         iterations_since_best_path = 0
         first_path_found_iter = None
+        timeout_reached = False
 
         for i in range(self.max_iter):
+            if self.max_plan_time is not None and time.time() - start_time >= self.max_plan_time:
+                timeout_reached = True
+                print(f"达到单次规划时间上限 {self.max_plan_time:.1f} 秒，停止本轮继续优化")
+                break
+
+            if i % 50 == 0:
+                QApplication.processEvents()
+
             improved_this_iter = False
 
             rnd = self.sample_with_collision_check()
@@ -232,7 +242,9 @@ class Q_RRT_star:
                     ):
                         lastIndex = len(self.node_list) - 1
 
-                        tempPath, temp_path_length = self.get_final_course(lastIndex)
+                        tempPath, _ = self.get_final_course(lastIndex)
+                        if not tempPath:
+                            continue
                         tempPathLen = self.get_path_len(tempPath)
 
                         # 第一次找到路径
@@ -302,7 +314,7 @@ class Q_RRT_star:
             path_total_length = self.get_path_len(path)
             stats = {
                 'success': True,
-                'reason': None,
+                'reason': 'timeout_with_path' if timeout_reached else None,
                 'sampling_count': sampling_count,
                 'node_count': len(self.node_list),
                 'path_point_count': len(path),
@@ -322,7 +334,7 @@ class Q_RRT_star:
         else:
             stats = {
                 'success': False,
-                'reason': 'no_path_found',
+                'reason': 'timeout' if timeout_reached else 'no_path_found',
                 'sampling_count': sampling_count,
                 'node_count': len(self.node_list),
                 'path_point_count': 0,
@@ -339,13 +351,6 @@ class Q_RRT_star:
 
         return path, planning_time, stats
 
-    def rrt_star_planning(self):
-        """
-        兼容旧调用：只返回 path 和 elapsed。
-        """
-        path, elapsed, _ = self.plan_path()
-        return path, elapsed
-
     def plan(self, plan_surface):
         """
         适配项目统一接口：
@@ -357,23 +362,14 @@ class Q_RRT_star:
             return [], elapsed
 
         project_path = [point(p[0], p[1]) for p in path]
-        self._draw_path(plan_surface, project_path)
         return project_path, elapsed
 
-    @staticmethod
-    def _obstacles_to_circles(obstacles):
-        """把项目里的多边形障碍物粗略转成圆形障碍物，仅供自适应参数估计使用。"""
-        circles = []
-        for obs in obstacles or []:
-            if not obs:
-                continue
-            xs = [p[0] for p in obs]
-            ys = [p[1] for p in obs]
-            cx = sum(xs) / len(xs)
-            cy = sum(ys) / len(ys)
-            radius = max(math.hypot(x - cx, y - cy) for x, y in obs)
-            circles.append((cx, cy, radius))
-        return circles
+    def rrt_star_planning(self):
+        """
+        兼容旧调用：只返回 path 和 elapsed。
+        """
+        path, elapsed, _ = self.plan_path()
+        return path, elapsed
 
     def _make_node(self, x, y, cost=0.0, parent=None):
         """使用项目已有的 point 节点，并补充 Q-RRT* 需要的运行时属性。"""
@@ -389,38 +385,20 @@ class Q_RRT_star:
             return (value.x, value.y)
         return (value[0], value[1])
 
-    def _init_surface_metrics(self):
-        """从项目真实障碍物图层提取密度和距离场，用于自适应参数。"""
-        if self.surface_obstacle is None:
-            return
-        pixels = pygame.surfarray.array3d(self.surface_obstacle)
-        black_mask = np.all(pixels[:, :, :3] == 0, axis=2)
-        self.surface_obstacle_density = float(np.mean(black_mask))
-        # distance_transform_edt 计算的是非障碍像素到最近障碍像素的距离。
-        self.obstacle_distance_map = distance_transform_edt(~black_mask.T)
-
-    def _is_black_obstacle_pixel(self, x, y):
-        if self.surface_obstacle is None:
-            return False
-        ix, iy = int(round(x)), int(round(y))
-        if ix < 0 or iy < 0 or ix >= self.surface_obstacle.get_width() or iy >= self.surface_obstacle.get_height():
-            return True
-        color = self.surface_obstacle.get_at((ix, iy))
-        return color[0] == 0 and color[1] == 0 and color[2] == 0
-
-    def _draw_path(self, plan_surface, path):
-        if plan_surface is None or not path:
-            return
-        for node in self.node_list or []:
-            pygame.draw.circle(plan_surface, (0, 120, 220), (int(node.x), int(node.y)), 1)
-            if node.parent is not None:
-                parent = self.node_list[node.parent]
-                pygame.draw.line(plan_surface, (120, 170, 220), (parent.x, parent.y), (node.x, node.y), 1)
-        for i in range(len(path) - 1):
-            pygame.draw.line(plan_surface, (128, 0, 128), (path[i].x, path[i].y), (path[i + 1].x, path[i + 1].y), 4)
-            pygame.draw.circle(plan_surface, (0, 100, 255), (int(path[i].x), int(path[i].y)), 3)
-        pygame.draw.circle(plan_surface, (0, 100, 255), (int(path[-1].x), int(path[-1].y)), 3)
-        QApplication.processEvents()
+    @staticmethod
+    def _obstacles_to_circles(obstacles):
+        """把项目里的多边形障碍物粗略转成圆形障碍物，仅供自适应参数估计使用。"""
+        circles = []
+        for obs in obstacles or []:
+            if not obs:
+                continue
+            xs = [p[0] for p in obs]
+            ys = [p[1] for p in obs]
+            cx = sum(xs) / len(xs)
+            cy = sum(ys) / len(ys)
+            radius = max(math.hypot(x - cx, y - cy) for x, y in obs)
+            circles.append((cx, cy, radius))
+        return circles
 
     def _infer_map_bounds(self, start, goal, obstacle_list, margin_ratio=0.15):
         """
@@ -483,6 +461,19 @@ class Q_RRT_star:
         else:
             raise ValueError("rand_area 必须是 (min, max) 或 (xmin, xmax, ymin, ymax)")
 
+    def _init_surface_metrics(self):
+        """从项目真实障碍物图层提取黑色障碍物掩码。"""
+        if self.surface_obstacle is None:
+            return
+        pixels = pygame.surfarray.array3d(self.surface_obstacle)
+        black_mask = np.all(pixels[:, :, :3] == 0, axis=2)
+        self.obstacle_mask = black_mask.T
+        self.surface_obstacle_density = float(np.mean(self.obstacle_mask))
+        obstacle_yx = np.argwhere(self.obstacle_mask)
+        if obstacle_yx.size > 0:
+            obstacle_xy = obstacle_yx[:, [1, 0]]
+            self.obstacle_kdtree = cKDTree(obstacle_xy)
+
     def _auto_config(self):
         """
         根据地图尺度、起终点距离、障碍物密度自动生成规划参数。
@@ -523,8 +514,6 @@ class Q_RRT_star:
 
         # ==============================
         # 2. 自适应步长参数
-        # 必须先定义 step_min / step_max
-        # 后面 path_sample_step 才能使用 self.step_min
         # ==============================
         self.step_min = self.params.get(
             'minExpandDis',
@@ -536,21 +525,10 @@ class Q_RRT_star:
             max(0.08 * base_scale, 1.5 * self.step_min)
         )
 
-        self.base_step = self.params.get(
-            'expandDis',
-            0.5 * (self.step_min + self.step_max)
-        )
-
         # ==============================
         # 3. 路径后处理参数
-        # 这里必须放在 step_min 后面
         # ==============================
         self.use_path_post_process = self.params.get('usePathPostProcess', True)
-
-        self.path_sample_step = self.params.get(
-            'pathSampleStep',
-            max(0.5 * self.step_min, 0.02 * self.map_diag)
-        )
 
         # ==============================
         # 4. 终点连接距离
@@ -637,6 +615,7 @@ class Q_RRT_star:
             'maxIterationsWithoutImprovement',
             max(self.patience * 3, int(0.25 * self.max_iter))
         )
+        self.max_plan_time = self.params.get('maxPlanTime', 8.0)
 
     def sample_with_collision_check(self):
         """
@@ -657,117 +636,35 @@ class Q_RRT_star:
 
         return None
 
-    def check_sample_collision(self, rnd):
+    def sample(self):
         """
-        检查采样点是否与障碍物或安全膨胀区域发生碰撞。
+        采样策略：
+        1. 未找到路径前：全局随机采样 + 目标偏置采样；
+        2. 找到第一条路径后：以较高概率使用 Informed RRT* 椭圆采样；
+        3. 保留一定概率的全局采样，避免搜索空间过早收缩。
         """
-        if self._is_black_obstacle_pixel(rnd[0], rnd[1]):
-            return True
-        if self.surface_obstacle is not None:
-            return False
-        for (ox, oy, size) in self.obstacle_list:
-            safe_r = size + self.safe_clearance
-            if (rnd[0] - ox) ** 2 + (rnd[1] - oy) ** 2 <= safe_r ** 2:
-                return True
-        return False
 
-    def check_segment_collision(self, x1, y1, x2, y2):
-        if self.surface_obstacle is not None:
-            return not self.collision((x1, y1), (x2, y2))
+        # 已经找到第一条路径后，优先进行 Informed 椭圆采样
+        if (
+                self.use_informed_sampling
+                and self.current_best_path_len < float('inf')
+                and random.randint(0, 100) < self.informed_sample_rate
+        ):
+            rnd = self.informed_sample()
 
-        distance = math.hypot(x2 - x1, y2 - y1)
-        if distance < 1e-6:
-            return not self.check_sample_collision([x1, y1])
+            if rnd is not None and self.is_inside_map(rnd):
+                return rnd
 
-        for (ox, oy, size) in self.obstacle_list:
-            safe_r = size + self.safe_clearance
-            dd = self.distance_squared_point_to_segment(
-                np.array([x1, y1]),
-                np.array([x2, y2]),
-                np.array([ox, oy])
-            )
-            if dd <= safe_r ** 2:
-                return False
-        return True
+        # 否则执行原来的全局采样 + 目标偏置
+        if random.randint(0, 100) > self.goal_sample_rate:
+            rnd = [
+                random.uniform(self.x_min, self.x_max),
+                random.uniform(self.y_min, self.y_max)
+            ]
+        else:
+            rnd = [self.goal.x, self.goal.y]
 
-    def collision(self, src, dst):
-        """
-        使用项目 RRT 同款地图碰撞检测：沿线段逐像素检查 obs_surface 上的黑色障碍物。
-        返回 True 表示发生碰撞。
-        """
-        vx, vy = self.normalize(dst[0] - src[0], dst[1] - src[1])
-        curr = list(src)
-        if math.hypot(curr[0] - dst[0], curr[1] - dst[1]) <= 1:
-            return self._is_black_obstacle_pixel(curr[0], curr[1])
-        while math.hypot(curr[0] - dst[0], curr[1] - dst[1]) > 1:
-            if self._is_black_obstacle_pixel(curr[0], curr[1]):
-                return True
-            curr[0] += vx
-            curr[1] += vy
-        return False
-
-    def normalize(self, vx, vy):
-        norm = math.sqrt(vx * vx + vy * vy)
-        if norm > 1e-6:
-            return vx / norm, vy / norm
-        return 0, 0
-
-    def get_nearest_obstacle_distance(self, node):
-        """
-        计算节点到最近障碍物边界的距离。
-        """
-        if self.obstacle_distance_map is not None:
-            ix = int(round(node.x))
-            iy = int(round(node.y))
-            if ix < 0 or iy < 0 or ix >= self.width or iy >= self.height:
-                return 0.0
-            return float(self.obstacle_distance_map[iy, ix])
-
-        if len(self.obstacle_list) == 0:
-            return self.map_diag
-
-        min_dist = float('inf')
-        for ox, oy, size in self.obstacle_list:
-            center_dist = math.hypot(node.x - ox, node.y - oy)
-            boundary_dist = center_dist - size - self.safe_clearance
-            min_dist = min(min_dist, boundary_dist)
-
-        return max(0.0, min_dist)
-
-    def get_adaptive_expand_dis(self, nearestNode):
-        """
-        距离障碍物越远，步长越大；
-        距离障碍物越近，步长越小。
-        """
-        obs_dist = self.get_nearest_obstacle_distance(nearestNode)
-
-        ratio = obs_dist / max(1e-6, self.adaptive_step_range)
-        ratio = min(1.0, max(0.0, ratio))
-
-        step = self.step_min + ratio * (self.step_max - self.step_min)
-
-        return step
-
-    def is_inside_map(self, rnd):
-        """
-        判断采样点是否在地图范围内。
-        """
-        return (
-                self.x_min <= rnd[0] <= self.x_max
-                and self.y_min <= rnd[1] <= self.y_max
-        )
-
-    def sample_unit_ball(self):
-        """
-        在二维单位圆内均匀采样。
-        """
-        r = math.sqrt(random.random())
-        theta = random.uniform(0.0, 2.0 * math.pi)
-
-        return np.array([
-            r * math.cos(theta),
-            r * math.sin(theta)
-        ])
+        return rnd
 
     def informed_sample(self):
         """
@@ -826,35 +723,26 @@ class Q_RRT_star:
 
         return [float(x_world[0]), float(x_world[1])]
 
-    def sample(self):
+    def sample_unit_ball(self):
         """
-        采样策略：
-        1. 未找到路径前：全局随机采样 + 目标偏置采样；
-        2. 找到第一条路径后：以较高概率使用 Informed RRT* 椭圆采样；
-        3. 保留一定概率的全局采样，避免搜索空间过早收缩。
+        在二维单位圆内均匀采样。
         """
+        r = math.sqrt(random.random())
+        theta = random.uniform(0.0, 2.0 * math.pi)
 
-        # 已经找到第一条路径后，优先进行 Informed 椭圆采样
-        if (
-                self.use_informed_sampling
-                and self.current_best_path_len < float('inf')
-                and random.randint(0, 100) < self.informed_sample_rate
-        ):
-            rnd = self.informed_sample()
+        return np.array([
+            r * math.cos(theta),
+            r * math.sin(theta)
+        ])
 
-            if rnd is not None and self.is_inside_map(rnd):
-                return rnd
-
-        # 否则执行原来的全局采样 + 目标偏置
-        if random.randint(0, 100) > self.goal_sample_rate:
-            rnd = [
-                random.uniform(self.x_min, self.x_max),
-                random.uniform(self.y_min, self.y_max)
-            ]
-        else:
-            rnd = [self.goal.x, self.goal.y]
-
-        return rnd
+    def is_inside_map(self, rnd):
+        """
+        判断采样点是否在地图范围内。
+        """
+        return (
+                self.x_min <= rnd[0] <= self.x_max
+                and self.y_min <= rnd[1] <= self.y_max
+        )
 
     def rebuild_kdtree(self):
         """
@@ -940,6 +828,116 @@ class Q_RRT_star:
         return self._make_node(new_x, new_y, nearestNode.cost + adaptive_expand_dis, n_ind)
 
     # 计算点到直线的距离方法
+    def get_adaptive_expand_dis(self, nearestNode):
+        """
+        距离障碍物越远，步长越大；
+        距离障碍物越近，步长越小。
+        """
+        obs_dist = self.get_nearest_obstacle_distance(nearestNode)
+
+        ratio = obs_dist / max(1e-6, self.adaptive_step_range)
+        ratio = min(1.0, max(0.0, ratio))
+
+        step = self.step_min + ratio * (self.step_max - self.step_min)
+
+        return step
+
+    def get_nearest_obstacle_distance(self, node):
+        """
+        计算节点到最近障碍物边界的距离。
+        """
+        if self.surface_obstacle is not None:
+            if self.obstacle_kdtree is None:
+                return self.map_diag
+            distance, _ = self.obstacle_kdtree.query([node.x, node.y])
+            return max(0.0, float(distance))
+
+        if len(self.obstacle_list) == 0:
+            return self.map_diag
+
+        min_dist = float('inf')
+        for ox, oy, size in self.obstacle_list:
+            center_dist = math.hypot(node.x - ox, node.y - oy)
+            boundary_dist = center_dist - size - self.safe_clearance
+            min_dist = min(min_dist, boundary_dist)
+
+        return max(0.0, min_dist)
+
+    def check_sample_collision(self, rnd):
+        """
+        检查采样点是否与障碍物或安全膨胀区域发生碰撞。
+        """
+        if self.surface_obstacle is not None:
+            return self._is_obstacle_pixel_fast(rnd[0], rnd[1])
+        for (ox, oy, size) in self.obstacle_list:
+            safe_r = size + self.safe_clearance
+            if (rnd[0] - ox) ** 2 + (rnd[1] - oy) ** 2 <= safe_r ** 2:
+                return True
+        return False
+
+    def check_segment_collision(self, x1, y1, x2, y2):
+        if self.surface_obstacle is not None:
+            return not self.collision((x1, y1), (x2, y2))
+
+        distance = math.hypot(x2 - x1, y2 - y1)
+        if distance < 1e-6:
+            return not self.check_sample_collision([x1, y1])
+
+        for (ox, oy, size) in self.obstacle_list:
+            safe_r = size + self.safe_clearance
+            dd = self.distance_squared_point_to_segment(
+                np.array([x1, y1]),
+                np.array([x2, y2]),
+                np.array([ox, oy])
+            )
+            if dd <= safe_r ** 2:
+                return False
+        return True
+
+    def collision(self, src, dst):
+        """
+        使用项目 RRT 同款地图语义：沿线段检查 obs_surface 上的黑色障碍物。
+        返回 True 表示发生碰撞。
+        """
+        if self.obstacle_mask is None:
+            for (ox, oy, size) in self.obstacle_list:
+                safe_r = size + self.safe_clearance
+                dd = self.distance_squared_point_to_segment(
+                    np.array([src[0], src[1]]),
+                    np.array([dst[0], dst[1]]),
+                    np.array([ox, oy])
+                )
+                if dd <= safe_r ** 2:
+                    return True
+            return False
+
+        distance = math.hypot(dst[0] - src[0], dst[1] - src[1])
+        steps = max(2, int(math.ceil(distance)) + 1)
+        xs = np.linspace(src[0], dst[0], steps).astype(np.int64)
+        ys = np.linspace(src[1], dst[1], steps).astype(np.int64)
+
+        out_of_bounds = (
+            (xs < 0) | (ys < 0) |
+            (xs >= self.width) | (ys >= self.height)
+        )
+        if np.any(out_of_bounds):
+            return True
+
+        return bool(np.any(self.obstacle_mask[ys, xs]))
+
+    def _is_obstacle_pixel_fast(self, x, y):
+        if self.obstacle_mask is None:
+            return False
+        ix, iy = int(round(x)), int(round(y))
+        if ix < 0 or iy < 0 or ix >= self.width or iy >= self.height:
+            return True
+        return bool(self.obstacle_mask[iy, ix])
+
+    def check_collision(self, nearNode, theta, d):
+        end_x = nearNode.x + math.cos(theta) * d
+        end_y = nearNode.y + math.sin(theta) * d
+        return self.check_segment_collision(nearNode.x, nearNode.y, end_x, end_y)
+
     @staticmethod
     def distance_squared_point_to_segment(v, w, p):
         #第一种情况,两端点在同于一个点上时
@@ -1063,11 +1061,6 @@ class Q_RRT_star:
         print("min cost is inf")
         return newNode
 
-    def check_collision(self, nearNode, theta, d):
-        end_x = nearNode.x + math.cos(theta) * d
-        end_y = nearNode.y + math.sin(theta) * d
-        return self.check_segment_collision(nearNode.x, nearNode.y, end_x, end_y)
-
     def rewire(self, newNode, nearInds):
         """
         重连阶段：附近节点同时尝试连接 newNode 和 newNode 的父节点。
@@ -1093,6 +1086,8 @@ class Q_RRT_star:
             for parent_index, parent_node in candidate_parents:
                 if i == parent_index:
                     continue
+                if self._is_descendant(parent_index, i):
+                    continue
                 dx = nearNode.x - parent_node.x
                 dy = nearNode.y - parent_node.y
                 d = math.hypot(dx, dy)
@@ -1111,30 +1106,100 @@ class Q_RRT_star:
 
                 # 检查候选父节点 → 邻域节点 这条线段是否无碰撞
                 if self.check_collision(parent_node, theta, best_distance):
+                    old_parent = nearNode.parent
+                    old_cost = nearNode.cost
                     nearNode.parent = best_parent_index
                     nearNode.cost = best_cost
+                    if self._has_parent_cycle_from(i):
+                        nearNode.parent = old_parent
+                        nearNode.cost = old_cost
+                        continue
 
                     # 关键修改：递归更新 nearNode 的所有后代节点 cost
                     self.propagate_cost_to_leaves(i)
+
+    def _is_descendant(self, node_index, possible_ancestor_index):
+        """
+        判断 node_index 是否已经是 possible_ancestor_index 的后代。
+        防止重连时把祖先接到后代上，形成树环。
+        """
+        current_index = node_index
+        visited = set()
+        while current_index is not None:
+            if current_index == possible_ancestor_index:
+                return True
+            if current_index in visited:
+                return True
+            visited.add(current_index)
+            if current_index < 0 or current_index >= len(self.node_list):
+                return False
+            current_index = self.node_list[current_index].parent
+        return False
+
+    def _has_parent_cycle_from(self, start_index):
+        current_index = start_index
+        visited = set()
+        while current_index is not None:
+            if current_index in visited:
+                return True
+            visited.add(current_index)
+            if current_index < 0 or current_index >= len(self.node_list):
+                return True
+            current_index = self.node_list[current_index].parent
+        return False
 
     def propagate_cost_to_leaves(self, parent_index):
         """
         当某个节点的父节点或 cost 改变后，
         递归更新它所有子节点、孙节点的累计代价。
         """
+        children_map = {}
+        for child_index, node in enumerate(self.node_list):
+            if node.parent is None:
+                continue
+            children_map.setdefault(node.parent, []).append(child_index)
+        self._propagate_cost_to_leaves(parent_index, children_map, set())
+
+    def _propagate_cost_to_leaves(self, parent_index, children_map, visited):
+        if parent_index in visited:
+            return
+        visited.add(parent_index)
         parent_node = self.node_list[parent_index]
+        for child_index in children_map.get(parent_index, []):
+            node = self.node_list[child_index]
+            # 子节点 cost = 父节点 cost + 父子节点之间的距离
+            node.cost = parent_node.cost + self.line_cost(parent_node, node)
 
-        for i, node in enumerate(self.node_list):
-            if node.parent == parent_index:
-                # 子节点 cost = 父节点 cost + 父子节点之间的距离
-                node.cost = parent_node.cost + self.line_cost(parent_node, node)
-
-                # 继续更新该子节点的后代
-                self.propagate_cost_to_leaves(i)
+            # 继续更新该子节点的后代
+            self._propagate_cost_to_leaves(child_index, children_map, visited)
 
     def is_near_goal(self, node):
         d = self.line_cost(node, self.goal)
         return d < self.goal_connect_dist
+
+    def get_final_course(self, lastIndex):
+        # 将目标点作为路径的初始节点
+        path = [[self.goal.x, self.goal.y]]
+        # 循环直到找到没有父节点的节点，就是初始点
+        visited = set()
+        while self.node_list[lastIndex].parent is not None:
+            if lastIndex in visited:
+                print("路径回溯失败：检测到父节点环，跳过当前候选路径")
+                return None, 0
+            visited.add(lastIndex)
+            node = self.node_list[lastIndex]
+            path.append([node.x, node.y])
+            lastIndex = node.parent
+            if lastIndex < 0 or lastIndex >= len(self.node_list):
+                print("路径回溯失败：父节点索引越界，跳过当前候选路径")
+                return None, 0
+        path.append([self.start.x, self.start.y])
+
+        # 反转路径，使其从起点到终点
+        path.reverse()
+
+        path_length = len(path)  # 计算路径点的个数
+        return path, path_length
 
     def post_process_path(self, path):
         """
@@ -1211,22 +1276,6 @@ class Q_RRT_star:
                 return False
 
         return True
-
-    def get_final_course(self, lastIndex):
-        # 将目标点作为路径的初始节点
-        path = [[self.goal.x, self.goal.y]]
-        # 循环直到找到没有父节点的节点，就是初始点
-        while self.node_list[lastIndex].parent is not None:
-            node = self.node_list[lastIndex]
-            path.append([node.x, node.y])
-            lastIndex = node.parent
-        path.append([self.start.x, self.start.y])
-
-        # 反转路径，使其从起点到终点
-        path.reverse()
-
-        path_length = len(path)  # 计算路径点的个数
-        return path, path_length
 
     @staticmethod
     def get_path_len(path):

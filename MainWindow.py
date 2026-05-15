@@ -487,7 +487,12 @@ class Ui_MainWindow(object):
                 spin_box_value = spin_box.value()
             else:
                 spin_box_value = 1
+            grid_widget.preserve_qrrt_plan_surface = radio_button_QRRTStar.isChecked() and spin_box_value > 1
             for i in range(spin_box_value):
+                label_notice.setText(f"正在规划路径！第 {i + 1}/{spin_box_value} 次")
+                grid_widget.update()
+                QApplication.processEvents()
+
                 track = []  # 算法执行所得的路径
                 time = None  # 算法花费的时间
                 original_track = None  # 原始路径，未优化的路径
@@ -524,11 +529,14 @@ class Ui_MainWindow(object):
                 elif radio_button_dbvspRRT.isChecked():
                     obstacle_overlap = "dbvspRRT"
                     track, time = grid_widget.startDbvsPRrt()
-                label_notice.setText("正在规划路径！")
+                grid_widget.update()
+                QApplication.processEvents()
                 # 保存结果部分
                 if radio_button_result_true.isChecked():
                     filepath = label_path.text()+"/"+line_edit_result.text()+str(i)+".txt"
                     grid_widget.save_result(time1=time, track=track, file_path=filepath, original_track=original_track)
+                    QApplication.processEvents()
+            grid_widget.preserve_qrrt_plan_surface = False
 
         # 连接按钮的点击信号
         self.button_generate_obstacle.clicked.connect(on_button_click)

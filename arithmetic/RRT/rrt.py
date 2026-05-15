@@ -48,6 +48,12 @@ class Rrt:
     def dist(self, p1, p2):
         return math.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
 
+    def path_length(self, path):
+        length = 0
+        for i in range(1, len(path)):
+            length += self.dist((path[i - 1].x, path[i - 1].y), (path[i].x, path[i].y))
+        return length
+
     def steer(self, nearest_node, target_point, max_distance):
         """
         从最近节点朝目标点直线扩展，直到最大距离。
@@ -207,6 +213,8 @@ class Rrt:
                 print(end - start)
                 print("总迭代次数为")
                 print(i)
+                print("路径总长度为")
+                print(self.path_length(path))
                 return path, end - start
 
             # 绘制过程中的点和线
