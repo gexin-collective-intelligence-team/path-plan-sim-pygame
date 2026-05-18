@@ -562,12 +562,22 @@ class dapfRRT:
 
                 path = [self.end]  # 确保路径以目标点结束
 
+                visited = set()
+                max_trace_len = len(tree) + 2
                 while current_node is not None:
+                    node_id = id(current_node)
+                    if node_id in visited or len(path) > max_trace_len:
+                        print("路径回溯检测到父节点环，跳过当前候选路径")
+                        path = None
+                        break
+                    visited.add(node_id)
                     path.append(current_node)
                     pygame.draw.line(plan_surface, (255, 0, 0), (current_node.x, current_node.y),
                                      (current_node.x, current_node.y), 4)
                     current_node = current_node.father
 
+                if path is None:
+                    continue
                 path.append(self.start)  # 确保路径以起始点开始
                 middtimer = time.time()
                 print("路径规划花费时间为")

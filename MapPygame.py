@@ -1366,6 +1366,8 @@ class PygameWidget(QWidget):
     def startApfRrt(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
+        from arithmetic.APFRRT.Node import point
+        point.clear()
         self.result, time = APFRRT(self).plan(self.plan_surface)
 
         # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
@@ -1381,7 +1383,6 @@ class PygameWidget(QWidget):
                 if key_points[-1] != (self.end_point[0], self.end_point[1]):
                     key_points.append((self.end_point[0], self.end_point[1]))
 
-            from arithmetic.APFRRT.Node import point
             optimized_result = [point(x, y) for x, y in key_points]
             print(f"🔄 APFRRT路径优化: {len(self.result)} → {len(optimized_result)} 点")
             self.result = optimized_result
@@ -1394,6 +1395,8 @@ class PygameWidget(QWidget):
     def startApfRrt_dyn(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
+        from arithmetic.APFRRT.Node import point
+        point.clear()
         self.result, time = APFRRT_dyn(self).plan(self.plan_surface)
 
         # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
@@ -1409,7 +1412,6 @@ class PygameWidget(QWidget):
                 if key_points[-1] != (self.end_point[0], self.end_point[1]):
                     key_points.append((self.end_point[0], self.end_point[1]))
 
-            from arithmetic.APFRRT.Node import point
             optimized_result = [point(x, y) for x, y in key_points]
             print(f"🔄 APFRRT_dyn路径优化: {len(self.result)} → {len(optimized_result)} 点")
             self.result = optimized_result
@@ -1421,6 +1423,8 @@ class PygameWidget(QWidget):
     def startDbvsPRrt(self):
         self.plan_surface.fill(self.back_color)
         self.result = None
+        from arithmetic.APFRRT.Node import point
+        point.clear()
         self.result, time = dbvsAPFRRT_dyn(self).plan(self.plan_surface)
 
         # 路径优化：对原始路径进行稀疏化处理，确保保留起点和终点
@@ -1436,7 +1440,6 @@ class PygameWidget(QWidget):
                 if key_points[-1] != (self.end_point[0], self.end_point[1]):
                     key_points.append((self.end_point[0], self.end_point[1]))
 
-            from arithmetic.APFRRT.Node import point
             optimized_result = [point(x, y) for x, y in key_points]
             print(f"🔄 dbvsAPFRRT_dyn路径优化: {len(self.result)} → {len(optimized_result)} 点")
             self.result = optimized_result

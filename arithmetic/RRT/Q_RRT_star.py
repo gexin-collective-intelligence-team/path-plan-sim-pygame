@@ -3,10 +3,24 @@ import random
 import time
 import numpy as np
 import pygame
+from scipy.ndimage import distance_transform_edt
 from scipy.spatial import cKDTree
 from PyQt5.QtWidgets import QApplication
 
 from .Node import point
+
+
+class _PlannerNode:
+    """Q-RRT* 内部轻量节点，避免项目 point 的全局去重扫描拖慢采样树。"""
+
+    __slots__ = ("x", "y", "cost", "parent", "father")
+
+    def __init__(self, x, y, cost=0.0, parent=None):
+        self.x = float(x)
+        self.y = float(y)
+        self.cost = cost
+        self.parent = parent
+        self.father = None
 
 
 # ====================== 路径规划类 ======================
@@ -16,7 +30,7 @@ class Q_RRT_star:
         self.mapdata = None
         self.surface_obstacle = None
         self.obstacle_mask = None
-        self.obstacle_kdtree = None
+        self.obstacle_distance_map = None
         self.surface_obstacle_density = None
         self.width = None
         self.height = None
@@ -40,7 +54,6 @@ class Q_RRT_star:
             project_defaults = {
                 "agent_radius": 0.0,
                 "clearance": 0.0,
-                "extra_inflation": 0.0,
                 "maxIterAuto": 2200,
                 "maxSampleAttempts": 80,
                 "patience": 90,
@@ -54,11 +67,12 @@ class Q_RRT_star:
         self.obstacle_list = obstacle_list if obstacle_list is not None else []
         self.params = params if params is not None else {}
         self.node_list = None
+        self.children = None
         self.start_to_goal_distance = None
         if rand_area is None:
             rand_area = self._infer_map_bounds(
-                start=self.start,
-                goal=self.goal,
+                start=self._start_xy,
+                goal=self._goal_xy,
                 obstacle_list=self.obstacle_list
             )
 
@@ -77,8 +91,8 @@ class Q_RRT_star:
         self.map_diag = math.hypot(self.map_width, self.map_height)
 
         # 3. 起终点距离
-        sx, sy = self.start
-        gx, gy = self.goal
+        sx, sy = self._start_xy
+        gx, gy = self._goal_xy
         self.start_goal_dist = max(1e-6, math.hypot(gx - sx, gy - sy))
 
         # 4. 障碍物尺度
@@ -128,6 +142,7 @@ class Q_RRT_star:
         self.start = self._make_node(self._start_xy[0], self._start_xy[1])
         self.goal = self._make_node(self._goal_xy[0], self._goal_xy[1])
         self.node_list = [self.start]
+        self.children = {0: set()}
         self.start_to_goal_distance = self.line_cost(self.start, self.goal)
 
         # 当前最优路径长度，供 Informed RRT* 椭圆采样使用
@@ -227,6 +242,7 @@ class Q_RRT_star:
 
                 # 添加节点
                 self.node_list.append(newNode)
+                self._register_child(len(self.node_list) - 1, newNode.parent)
 
                 # 添加节点后更新 KDTree
                 self.update_kdtree_after_append()
@@ -372,12 +388,8 @@ class Q_RRT_star:
         return path, elapsed
 
     def _make_node(self, x, y, cost=0.0, parent=None):
-        """使用项目已有的 point 节点，并补充 Q-RRT* 需要的运行时属性。"""
-        node = point(float(x), float(y))
-        node.cost = cost
-        node.parent = parent
-        node.father = None
-        return node
+        """创建 Q-RRT* 内部节点；最终输出时再转为项目 point。"""
+        return _PlannerNode(x, y, cost, parent)
 
     @staticmethod
     def _as_xy(value):
@@ -462,17 +474,16 @@ class Q_RRT_star:
             raise ValueError("rand_area 必须是 (min, max) 或 (xmin, xmax, ymin, ymax)")
 
     def _init_surface_metrics(self):
-        """从项目真实障碍物图层提取黑色障碍物掩码。"""
+        """从项目真实障碍物图层提取黑色障碍物掩码和距离场。"""
         if self.surface_obstacle is None:
             return
         pixels = pygame.surfarray.array3d(self.surface_obstacle)
         black_mask = np.all(pixels[:, :, :3] == 0, axis=2)
         self.obstacle_mask = black_mask.T
         self.surface_obstacle_density = float(np.mean(self.obstacle_mask))
-        obstacle_yx = np.argwhere(self.obstacle_mask)
-        if obstacle_yx.size > 0:
-            obstacle_xy = obstacle_yx[:, [1, 0]]
-            self.obstacle_kdtree = cKDTree(obstacle_xy)
+        if np.any(self.obstacle_mask):
+            # distance_transform_edt 在非障碍像素上给出到最近障碍像素的欧氏距离。
+            self.obstacle_distance_map = distance_transform_edt(~self.obstacle_mask)
 
     def _auto_config(self):
         """
@@ -496,16 +507,9 @@ class Q_RRT_star:
             self.params.get('safety_margin', 0.01 * self.map_diag)
         )
 
-        if 'extra_inflation' in self.params:
-            self.extra_inflation = self.params['extra_inflation']
-        else:
-            formation_radius = self.params.get('formation_radius', 0.0)
-            formation_safety_weight = self.params.get('formation_safety_weight', 0.5)
-            self.extra_inflation = formation_radius * formation_safety_weight
-
         self.safe_clearance = self.params.get(
             'safe_clearance',
-            self.agent_radius + self.clearance + self.extra_inflation
+            self.agent_radius + self.clearance
         )
 
         # 兼容旧代码/旧参数命名
@@ -847,10 +851,13 @@ class Q_RRT_star:
         计算节点到最近障碍物边界的距离。
         """
         if self.surface_obstacle is not None:
-            if self.obstacle_kdtree is None:
+            if self.obstacle_distance_map is None:
                 return self.map_diag
-            distance, _ = self.obstacle_kdtree.query([node.x, node.y])
-            return max(0.0, float(distance))
+            ix = int(round(node.x))
+            iy = int(round(node.y))
+            if ix < 0 or iy < 0 or ix >= self.width or iy >= self.height:
+                return 0.0
+            return max(0.0, float(self.obstacle_distance_map[iy, ix]))
 
         if len(self.obstacle_list) == 0:
             return self.map_diag
@@ -1061,6 +1068,25 @@ class Q_RRT_star:
         print("min cost is inf")
         return newNode
 
+    def _register_child(self, child_index, parent_index):
+        if self.children is None:
+            return
+        self.children.setdefault(child_index, set())
+        if parent_index is None:
+            return
+        if parent_index < 0 or parent_index >= len(self.node_list):
+            return
+        self.children.setdefault(parent_index, set()).add(child_index)
+
+    def _move_child(self, child_index, old_parent, new_parent):
+        if self.children is None:
+            return
+        self.children.setdefault(child_index, set())
+        if old_parent is not None and old_parent in self.children:
+            self.children[old_parent].discard(child_index)
+        if new_parent is not None:
+            self.children.setdefault(new_parent, set()).add(child_index)
+
     def rewire(self, newNode, nearInds):
         """
         重连阶段：附近节点同时尝试连接 newNode 和 newNode 的父节点。
@@ -1115,7 +1141,7 @@ class Q_RRT_star:
                         nearNode.cost = old_cost
                         continue
 
-                    # 关键修改：递归更新 nearNode 的所有后代节点 cost
+                    self._move_child(i, old_parent, best_parent_index)
                     self.propagate_cost_to_leaves(i)
 
     def _is_descendant(self, node_index, possible_ancestor_index):
@@ -1151,27 +1177,25 @@ class Q_RRT_star:
     def propagate_cost_to_leaves(self, parent_index):
         """
         当某个节点的父节点或 cost 改变后，
-        递归更新它所有子节点、孙节点的累计代价。
+        更新它所有子节点、孙节点的累计代价。
         """
-        children_map = {}
-        for child_index, node in enumerate(self.node_list):
+        if self.children is None:
+            return
+        stack = list(self.children.get(parent_index, ()))
+        visited = set()
+        while stack:
+            child_index = stack.pop()
+            if child_index in visited:
+                continue
+            visited.add(child_index)
+            if child_index < 0 or child_index >= len(self.node_list):
+                continue
+            node = self.node_list[child_index]
             if node.parent is None:
                 continue
-            children_map.setdefault(node.parent, []).append(child_index)
-        self._propagate_cost_to_leaves(parent_index, children_map, set())
-
-    def _propagate_cost_to_leaves(self, parent_index, children_map, visited):
-        if parent_index in visited:
-            return
-        visited.add(parent_index)
-        parent_node = self.node_list[parent_index]
-        for child_index in children_map.get(parent_index, []):
-            node = self.node_list[child_index]
-            # 子节点 cost = 父节点 cost + 父子节点之间的距离
-            node.cost = parent_node.cost + self.line_cost(parent_node, node)
-
-            # 继续更新该子节点的后代
-            self._propagate_cost_to_leaves(child_index, children_map, visited)
+            parent = self.node_list[node.parent]
+            node.cost = parent.cost + self.line_cost(parent, node)
+            stack.extend(self.children.get(child_index, ()))
 
     def is_near_goal(self, node):
         d = self.line_cost(node, self.goal)

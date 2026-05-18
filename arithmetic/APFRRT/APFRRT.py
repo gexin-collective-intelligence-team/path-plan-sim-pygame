@@ -39,6 +39,9 @@ class APFRRT():
         self.step = 10
         # 最大迭代次数
         self.max_iterations = 10000
+        self.max_resample_attempts = 50
+        self.max_plan_time = 12.0
+        self.event_update_interval = 20
         # 动态调整参数
         self.falsecount = 0
         self.flag=8
@@ -158,7 +161,6 @@ class APFRRT():
             random_x = random.uniform(0, self.width)
             random_y = random.uniform(0, self.height)
         if self.collision((current_point.x, current_point.y), (random_x, random_y)) or self.history_size>=2:
-            print("随机点")
             self.falsecount += 1
             self.history_size=0
             q=0.4
@@ -262,7 +264,7 @@ class APFRRT():
         distance_to_goal = self.dist((node.x, node.y), goal_point)
         return distance_to_goal <= tolerance
 
-    def expand(self, tree, max_distance):
+    def expand(self, tree, max_distance, deadline=None):
         """
         扩展 RRT 树，添加一个新节点。
 
@@ -275,29 +277,26 @@ class APFRRT():
         - new_node: 添加到树中的新节点，如果扩展失败则返回None。
         """
         current_node = tree[-1]
-        # 1. 随机抽样一个点
-        random_point = self.rand_point(current_node)
-        # 2. 找到树中距离随机点最近的节点
-        nearest_node = self.nearest_neighbor(tree, (random_point.x, random_point.y))
-        # 3. 从最近节点向随机点扩展
-        new_node = self.steer(nearest_node, (random_point.x, random_point.y), max_distance)
-        new_node.father = nearest_node
-        # 4. 检查是否与障碍物发生碰撞
-        while self.collision((nearest_node.x, nearest_node.y), (new_node.x, new_node.y)):
+        for _ in range(self.max_resample_attempts):
+            if deadline is not None and time.time() >= deadline:
+                return None
+            # 1. 随机抽样一个点
             random_point = self.rand_point(current_node)
             # 2. 找到树中距离随机点最近的节点
             nearest_node = self.nearest_neighbor(tree, (random_point.x, random_point.y))
             # 3. 从最近节点向随机点扩展
             new_node = self.steer(nearest_node, (random_point.x, random_point.y), max_distance)
+            if self.dist((nearest_node.x, nearest_node.y), (new_node.x, new_node.y)) < 1e-6:
+                continue
             new_node.father = nearest_node
-            # 如果没有碰撞，则将新节点添加到树中
-        if not self.collision((nearest_node.x, nearest_node.y), (new_node.x, new_node.y)):
-            tree.append(new_node)
-            return new_node
-        else:
-            # 如果发生碰撞，则返回 None 表示扩展失败
+            # 4. 检查是否与障碍物发生碰撞
+            if not self.collision((nearest_node.x, nearest_node.y), (new_node.x, new_node.y)):
+                tree.append(new_node)
+                return new_node
 
-            return None
+        # 本轮扩展连续失败，交回外层迭代，避免在内部重采样中卡死。
+        self.falsecount += 1
+        return None
 
     def collision(self, src, dst):
         """
@@ -376,6 +375,23 @@ class APFRRT():
         optimized_path.append(path[-1])
         return optimized_path
 
+    def trace_path_to_start(self, current_node, tree):
+        path = [self.end]
+        visited = set()
+        max_trace_len = len(tree) + 2
+
+        while current_node is not None:
+            node_id = id(current_node)
+            if node_id in visited or len(path) > max_trace_len:
+                print("路径回溯检测到父节点环，跳过当前候选路径")
+                return None
+            visited.add(node_id)
+            path.append(current_node)
+            current_node = current_node.father
+
+        path.append(self.start)
+        return path
+
     def plan(self, plan_surface):
         """
         执行 RRT 算法，寻找从起点到目标点的路径。
@@ -389,36 +405,35 @@ class APFRRT():
         - path: 表示 RRT 算法找到的路径的点列表，如果找不到路径则返回空列表。
         """
         start = time.time()
+        deadline = start + self.max_plan_time
         # 使用起始节点初始化树
         tree = [self.start]
         max_iterations = self.max_iterations
         max_distance = self.step
         # 执行 RRT 迭代
         for i in range(max_iterations):
+            if time.time() >= deadline:
+                print(f"APFRRT达到单次规划时间上限 {self.max_plan_time:.1f} 秒，停止本轮规划")
+                return [], time.time() - start
+
             # 1. 扩展树，添加一个新节点
             if i == max_iterations - 1:
                 print("Maximum达到迭代上限！！！！！！")
                 break
-            new_node = self.expand(tree, max_distance)
+            max_distance = self.step
+            new_node = self.expand(tree, max_distance, deadline)
             # 计算节点数目
             self.node_count += 1
             current_node = new_node
             if current_node:
-                pygame.draw.circle(plan_surface, (0, 100, 255), (current_node.x, current_node.y), 2)
-                QApplication.processEvents()
+                if i % self.event_update_interval == 0:
+                    pygame.draw.circle(plan_surface, (0, 100, 255), (current_node.x, current_node.y), 2)
+                    QApplication.processEvents()
             # 2. 检查是否达到目标点
             if new_node and self.is_goal_reached(new_node, (self.end.x, self.end.y), max_distance):
-
-                path = [self.end]  # 确保路径以目标点结束
-
-                while current_node is not None:
-
-                    path.append(current_node)
-                    pygame.draw.line(plan_surface, (255, 0, 0), (current_node.x, current_node.y),
-                                     (current_node.x, current_node.y), 4)
-                    current_node = current_node.father
-
-                path.append(self.start)  # 确保路径以起始点开始
+                path = self.trace_path_to_start(current_node, tree)
+                if path is None:
+                    continue
                 middtimer = time.time()
                 print("路径规划花费时间为")
                 print(middtimer - start)

@@ -576,16 +576,34 @@ class dbvsAPFRRT_dyn:
                 path = []
                 # 从 tree_a 方向回溯
                 cur = connect_node
+                visited = set()
+                max_trace_len = len(tree_start) + len(tree_goal) + 4
                 while cur:
+                    node_id = id(cur)
+                    if node_id in visited or len(path) > max_trace_len:
+                        print("路径回溯检测到父节点环，跳过当前候选路径")
+                        path = None
+                        break
+                    visited.add(node_id)
                     path.append(cur)
                     cur = cur.father
+                if path is None:
+                    continue
                 path = list(reversed(path))
 
                 # 从 tree_b 方向回溯
                 cur = nearest_in_b
                 while cur:
+                    node_id = id(cur)
+                    if node_id in visited or len(path) > max_trace_len:
+                        print("路径回溯检测到父节点环，跳过当前候选路径")
+                        path = None
+                        break
+                    visited.add(node_id)
                     path.append(cur)
                     cur = cur.father
+                if path is None:
+                    continue
 
                 mid_time = time.time()
                 print("路径规划时间:", mid_time - start_time)
